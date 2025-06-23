@@ -1,0 +1,112 @@
+from ib_insync import *
+import pandas as pd
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# === Load environment variables from .env ===
+load_dotenv()
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+
+# === Connect to TWS Paper Trading ===
+ib = IB()
+ib.connect('127.0.0.1', 7497, clientId=1)
+
+# === Define the SPY stock contract ===
+spy = Stock('SPY', 'SMART', 'USD')
+ib.qualifyContracts(spy)
+
+# === Request historical 5-minute data ===
+bars = ib.reqHistoricalData(
+    spy,
+    endDateTime='',
+    durationStr='3 D',
+    barSizeSetting='5 mins',
+    whatToShow='TRADES',
+    useRTH=True,  # Allow pre/post-market
+    formatDate=1
+)
+
+# === Check for empty response ===
+if not bars:
+    print("❌ No historical data received. Make sure TWS is running, logged in, and you have SPY data access.")
+    ib.disconnect()
+    exit()
+
+print(f"✅ Bars received: {len(bars)}")
+
+# === Create DataFrame and calculate indicators ===
+df = util.df(bars)
+df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
+df['sma'] = SMAIndicator(df['close'], window=20).sma_indicator()
+
+# === Determine trade direction ===
+latest = df.iloc[-1]
+direction = 'CALL' if latest['close'] > latest['sma'] and latest['rsi'] > 55 else 'PUT'
+print(f"📊 Close: {latest['close']:.2f} | SMA: {latest['sma']:.2f} | RSI: {latest['rsi']:.2f} → Direction: {direction}")
+
+# === Request options chain info ===
+chains = ib.reqSecDefOptParams('SPY', '', 'STK', spy.conId)
+chain = chains[0]
+
+# === Pick nearest strike and next expiration ===
+underlying_price = latest['close']
+strikes = sorted([strike for strike in chain.strikes if abs(strike - underlying_price) < 10])
+nearest_strike = min(strikes, key=lambda x: abs(x - underlying_price))
+
+expirations = sorted([exp for exp in chain.expirations if exp > datetime.now().strftime('%Y%m%d')])
+expiry = expirations[0]
+
+# === Build the Option contract ===
+right = 'C' if direction == 'CALL' else 'P'
+option = Option('SPY', expiry, nearest_strike, right, 'SMART')
+ib.qualifyContracts(option)
+
+# === Create market order and place trade ===
+order = MarketOrder('BUY', 1)
+trade = ib.placeOrder(option, order)
+
+print(f"📈 Simulated {direction} order: SPY {expiry} {nearest_strike} {right}")
+
+# === Email Notification Function ===
+def send_email(subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = EMAIL_RECEIVER
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        print("📧 Email sent.")
+    except Exception as e:
+        print("❌ Email failed:", e)
+
+# === Send email alert about trade ===
+email_subject = f"SPY Bot Test - {direction} Trade Executed"
+email_body = f"""
+Trade Summary:
+→ Direction: {direction}
+→ Strike: {nearest_strike}
+→ Expiration: {expiry}
+→ Price: ${latest['close']:.2f}
+→ RSI: {latest['rsi']:.2f}
+→ SMA: {latest['sma']:.2f}
+→ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+send_email(email_subject, email_body)
+
+# === Done ===
+ib.disconnect()
