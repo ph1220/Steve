@@ -10,6 +10,7 @@ import smtplib
 from email.mime.text import MIMEText
 import pandas_market_calendars as mcal
 import logging
+import math # Called below
 
 # --- CONFIG ---
 MAX_TRADES_PER_DAY = 3
@@ -99,20 +100,36 @@ def generate_signal(df):
 
 # --- Place Option Trade ---
 def place_option_trade(direction):
+    price = None 
     retries = 0
     while retries < 3:
+        market_data = None # Define for cancellation
         try:
             market_data = ib.reqMktData(Stock(UNDERLYING, 'SMART', 'USD'), '', False, False)
             ib.sleep(2)
-            price = float(market_data.last)
-            ib.cancelMktData(market_data)
-            break
+            temp_price = market_data.last 
+            if temp_price is not None and not math.isnan(float(temp_price)) and float(temp_price) > 0:
+                price = float(temp_price)
+                ib.cancelMktData(market_data)
+                market_data = None # Mark as cancelled
+                break 
+            else:
+                logging.warning(f"Invalid underlying price received: {temp_price}. Retrying...")
+                if market_data: # exists before cancelling
+                    ib.cancelMktData(market_data) 
+                market_data = None # mark as cancelled
         except Exception as e:
-            retries += 1
             logging.warning(f"Retrying market data... {e}")
-            time.sleep(2)
-    else:
-        logging.error("Failed to get market price after 3 retries")
+            if market_data: # checks before cancelling if exception occurred after reqMktData
+                try:
+                    ib.cancelMktData(market_data)
+                except: pass
+            market_data = None
+        retries += 1
+        if retries < 3: time.sleep(2)
+    
+    if price is None: 
+        logging.error("Failed to get valid market price after 3 retries")
         return None, None, None, None
 
     today = datetime.today()
@@ -135,10 +152,17 @@ def place_option_trade(direction):
     ticker = ib.reqMktData(contract, '', False, False)
     ib.sleep(2)
     ask = ticker.ask
+    if not (isinstance(ask, (int, float)) and not math.isnan(ask) and ask > 0):
+        logging.warning(f"Invalid or non-positive ask price received: {ask} for {contract.localSymbol if contract else 'N/A'}. Skipping trade.")
+        ib.cancelMktData(ticker)  # Ensure it is cancelled
+        return None, None, None, None # Exit before the problem calculation
     ib.cancelMktData(ticker)
 
     cost_per_contract = ask * 100
     qty = int((ACCOUNT_CASH * 0.1) / cost_per_contract)
+    if qty <= 0: # good to check if calculated quantity is valid
+        logging.warning(f"Calculated quantity is {qty}. Insufficient capital or too high contract cost ({cost_per_contract}). Skipping trade.")
+        return None, None, None, None # Checks if calculated quantity is valid
     order = LimitOrder('BUY', qty, ask)
     trade = ib.placeOrder(contract, order)
     ib.sleep(3)
@@ -153,6 +177,11 @@ def manage_trade(trade, contract, entry_price, qty):
         ticker = ib.reqMktData(contract, '', False, False)
         ib.sleep(2)
         mid_price = (ticker.bid + ticker.ask) / 2
+        if math.isnan(mid_price):
+            logging.warning(f"Mid price for {contract.localSymbol} is NaN. Bid: {ticker.bid}, Ask: {ticker.ask}. Skipping this check cycle.")
+            ib.cancelMktData(ticker) # cancels the current request
+            time.sleep(10)
+            continue # Keeps it from getting stuck with NaN Error
         ib.cancelMktData(ticker)
 
         change_pct = (mid_price - entry_price) / entry_price
