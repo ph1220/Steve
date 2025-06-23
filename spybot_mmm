@@ -1,0 +1,197 @@
+# spy_options_bot_v2.py
+import pandas as pd
+from ib_insync import *
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
+import yfinance as yf
+import time
+from datetime import datetime, timedelta
+import smtplib
+from email.mime.text import MIMEText
+import pandas_market_calendars as mcal
+import logging
+
+# --- CONFIG ---
+MAX_TRADES_PER_DAY = 3
+TP_PCT = 0.04  # Take Profit 4%
+SL_PCT = 0.02  # Stop Loss 2%
+ACCOUNT_CASH = 1000000  # $1M paper trading
+UNDERLYING = 'SPY'
+EMAIL_ALERTS = False  # Set to True and fill email config
+MODE = 'PAPER'  # or 'LIVE'
+
+EMAIL_FROM = 'your@email.com'
+EMAIL_TO = 'youremail@gmail.com'
+EMAIL_SUBJECT = 'SPY Bot Trade Alert'
+SMTP_SERVER = 'smtp.gmail.com'
+SMTP_PORT = 587
+EMAIL_USER = 'your@email.com'
+EMAIL_PASS = 'yourpassword'
+
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s', handlers=[
+    logging.FileHandler("spy_bot.log"),
+    logging.StreamHandler()
+])
+
+# --- INIT IBKR CONNECTION ---
+ib = IB()
+ib.connect('127.0.0.1', 7497, clientId=1)
+
+trade_log = []
+trade_count = 0
+
+# --- Email Helper ---
+def send_email(body):
+    if not EMAIL_ALERTS:
+        return
+    msg = MIMEText(body)
+    msg['Subject'] = EMAIL_SUBJECT
+    msg['From'] = EMAIL_FROM
+    msg['To'] = EMAIL_TO
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        server.quit()
+    except Exception as e:
+        logging.error(f"Email failed: {e}")
+
+# --- Market Hours Helper (CST) ---
+def is_market_open():
+    nyse = mcal.get_calendar('NYSE')
+    now = pd.Timestamp.now(tz='America/Chicago')
+    schedule = nyse.schedule(start_date=now.date(), end_date=now.date())
+    if schedule.empty:
+        return False
+    market_open = schedule.iloc[0]['market_open'].tz_convert('America/Chicago')
+    market_close = schedule.iloc[0]['market_close'].tz_convert('America/Chicago')
+    return market_open <= now <= market_close
+
+# --- Fetch Historical Data ---
+def get_5min_data():
+    df = yf.download(UNDERLYING, interval='5m', period='1d')
+    df.dropna(inplace=True)
+    close = df['Close']
+    if isinstance(close, pd.DataFrame):
+        close = close.squeeze()
+    df['RSI'] = RSIIndicator(close=close).rsi()
+    df['SMA5'] = SMAIndicator(close=close, window=5).sma_indicator()
+    df['SMA20'] = SMAIndicator(close=close, window=20).sma_indicator()
+    return df
+
+# --- Generate Trading Signal ---
+def generate_signal(df):
+    if df is None or len(df) < 21:
+        return None
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    latest_rsi = float(latest['RSI'])
+    prev_rsi = float(prev['RSI'])
+    sma5 = float(latest['SMA5'])
+    sma20 = float(latest['SMA20'])
+    if latest_rsi < 70 and latest_rsi > prev_rsi and sma5 > sma20:
+        return 'CALL'
+    elif latest_rsi > 30 and latest_rsi < prev_rsi and sma5 < sma20:
+        return 'PUT'
+    return None
+
+# --- Place Option Trade ---
+def place_option_trade(direction):
+    retries = 0
+    while retries < 3:
+        try:
+            market_data = ib.reqMktData(Stock(UNDERLYING, 'SMART', 'USD'), '', False, False)
+            ib.sleep(2)
+            price = float(market_data.last)
+            ib.cancelMktData(market_data)
+            break
+        except Exception as e:
+            retries += 1
+            logging.warning(f"Retrying market data... {e}")
+            time.sleep(2)
+    else:
+        logging.error("Failed to get market price after 3 retries")
+        return None, None, None, None
+
+    today = datetime.today()
+    if today.weekday() == 4 and today.hour >= 9:
+        days_ahead = 7
+    else:
+        days_ahead = (4 - today.weekday()) % 7
+    next_friday = today + timedelta(days=days_ahead)
+    expiry = next_friday.strftime('%Y%m%d')
+    strike = round(price)
+
+    contracts = ib.reqSecDefOptParams(UNDERLYING, '', 'STK', 0)
+    chain = ib.reqContractDetails(Option(UNDERLYING, expiry, strike, direction.lower(), 'SMART'))
+    if not chain:
+        logging.warning("No contract found")
+        return None, None, None, None
+
+    contract = chain[0].contract
+    ib.qualifyContracts(contract)
+    ticker = ib.reqMktData(contract, '', False, False)
+    ib.sleep(2)
+    ask = ticker.ask
+    ib.cancelMktData(ticker)
+
+    cost_per_contract = ask * 100
+    qty = int((ACCOUNT_CASH * 0.1) / cost_per_contract)
+    order = LimitOrder('BUY', qty, ask)
+    trade = ib.placeOrder(contract, order)
+    ib.sleep(3)
+
+    logging.info(f"Entered {direction} @ ${ask}, qty={qty}")
+    send_email(f"Entered {direction} SPY Option\nStrike: {strike}, Exp: {expiry}\nQty: {qty}, Entry: ${ask}")
+    return trade, contract, ask, qty
+
+# --- Monitor and Exit Trade ---
+def manage_trade(trade, contract, entry_price, qty):
+    while True:
+        ticker = ib.reqMktData(contract, '', False, False)
+        ib.sleep(2)
+        mid_price = (ticker.bid + ticker.ask) / 2
+        ib.cancelMktData(ticker)
+
+        change_pct = (mid_price - entry_price) / entry_price
+        if change_pct >= TP_PCT or change_pct <= -SL_PCT:
+            order = MarketOrder('SELL', qty)
+            ib.placeOrder(contract, order)
+            logging.info(f"Exited trade @ ${mid_price:.2f} ({change_pct*100:.2f}%)")
+            send_email(f"Exited Trade\nExit: ${mid_price:.2f}, P/L: {change_pct*100:.2f}%")
+            return change_pct
+        time.sleep(10)
+
+# --- Main Loop ---
+logging.info("Starting SPY Trading Bot...")
+while trade_count < MAX_TRADES_PER_DAY:
+    if not is_market_open():
+        logging.info("Market is closed. Waiting 5 minutes...")
+        time.sleep(300)
+        continue
+    try:
+        data = get_5min_data()
+        signal = generate_signal(data)
+        if signal:
+            trade, contract, entry, qty = place_option_trade(signal)
+            if trade and contract:
+                pl = manage_trade(trade, contract, entry, qty)
+                trade_log.append({
+                    'Time': datetime.now(),
+                    'Direction': signal,
+                    'Entry': entry,
+                    'Exit_Pct': pl
+                })
+                trade_count += 1
+        else:
+            logging.info("No valid signal. Waiting 5 minutes...")
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        send_email(f"Error in trading bot: {e}")
+    time.sleep(300)
+
+# Save log
+pd.DataFrame(trade_log).to_csv('spy_trade_log.csv', index=False)
+ib.disconnect()
