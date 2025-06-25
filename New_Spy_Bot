@@ -96,7 +96,12 @@ def get_option_price_yahoo(expiry, strike, direction):
         if (bid == 0 and ask == 0) and last > 0:
             mid = last
         elif bid == 0 and ask == 0 and last == 0:
-            mid = round(strike * 0.01, 2)  # Emergency fallback
+            print("⚠️ Option has no bid, ask, or last price. Unreliable.")
+            return None # Using an arbitrary price here could lead to incorrect trailing stop calculations and premature exits.
+
+        # elif bid == 0 and ask == 0 and last == 0:
+        #     mid = round(strike * 0.01, 2)  # Emergency fallback
+        
         else:
             mid = round((bid + ask) / 2, 2)
 
@@ -134,23 +139,29 @@ def close_position(contract):
         if pos.contract.conId == contract.conId:
             qty = pos.position
             order = MarketOrder('SELL', qty)
-            trade = ib.placeOrder(contract, order)
+            trade = ib.placeOrder(contract, order) 
             print("📤 Sell order placed.")
 
+            # Original wait loop - NOW CORRECTLY INDENTED
             while trade.isActive():
                 ib.waitOnUpdate()
 
+            # Simplified check and return - NOW CORRECTLY INDENTED
             if trade.orderStatus.status == 'Filled':
                 msg = f"✅ Position closed: {trade.orderStatus}"
                 print(msg)
                 send_email("Position Closed", msg)
+                return True # Explicitly return True for success
             else:
-                msg = f"❌ Failed to close: {trade.orderStatus}"
+                msg = f"❌ Failed to close (Status: {trade.orderStatus.status})"
                 print(msg)
                 send_email("Close Error", msg)
-            return
+                return False # Explicitly return False for other outcomes
+            # If the position was found and processed, we return from inside this block.
+            # No need for a 'break' if conId is unique and we return.
 
     print("⚠️ No matching open position found.")
+    return False # Return False if position was not found after checking all
 
 # =========================
 # ⏳ Trailing Stop Monitor (Yahoo Powered)
@@ -159,7 +170,17 @@ def monitor_position_with_trailing(strike, direction, expiry, entry_price, contr
     trailing_percent = 5
     highest_price = entry_price
 
+    # while True: loop NOW CORRECTLY INDENTED
     while True:
+        if not is_market_open():
+            print("⏰ Market closed while monitoring. Attempting to close position.")
+            if not close_position(contract): # Check the boolean return
+                # Minimal alert for failure
+                error_msg = f"ALERT: Attempt to close {contract.localSymbol} at EOD did not confirm 'Filled'." # Assuming contract has localSymbol
+                print(error_msg)
+                send_email(f"Potential Issue: EOD Close - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", error_msg)
+            break
+
         current_price = get_option_price_yahoo(expiry, strike, direction)
 
         if current_price is None:
@@ -176,8 +197,12 @@ def monitor_position_with_trailing(strike, direction, expiry, entry_price, contr
         print(f"📊 Current Price: {current_price} | Stop Price: {stop_price}")
 
         if current_price <= stop_price:
-            print("🛑 Trailing stop hit! Closing...")
-            close_position(contract)
+            print("🛑 Trailing stop hit! Attempting to close...")
+            if not close_position(contract): # Check the boolean return
+                # Minimal alert for failure
+                error_msg = f"ALERT: Attempt to close {contract.localSymbol} on stop-loss did not confirm 'Filled'." # Assuming contract has localSymbol
+                print(error_msg)
+                send_email(f"Potential Issue: Stop Loss Close - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", error_msg)
             break
 
         time.sleep(30)
