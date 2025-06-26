@@ -242,17 +242,17 @@ def trade_spy_options():
 
             # User-adjustable VIX thresholds and risk modifications:
             # These are example values; tune them based on backtesting and risk preference.
-            high_vix_threshold = 28.0
-            low_vix_threshold = 15.0
+            high_vix_threshold = 24.0
+            low_vix_threshold = 17.0
 
             if current_vix > high_vix_threshold: # High volatility scenario
                 current_allocation_percentage = base_allocation_percentage * 0.5  # Example: Halve allocation
-                current_trailing_percent = 7.0  # Example: Wider trailing stop
+                current_trailing_percent = 20.0  # Example: Wider trailing stop
                 print(f"🔶 High VIX ({current_vix:.2f}): Adjusting allocation to {current_allocation_percentage*100:.1f}%, trailing stop to {current_trailing_percent}%.")
             elif current_vix < low_vix_threshold: # Low volatility scenario
                 # Note: Increasing allocation in low VIX should be done cautiously.
-                current_allocation_percentage = base_allocation_percentage * 1.2 # Example: Slightly increase allocation
-                current_trailing_percent = 3.5  # Example: Tighter trailing stop
+                current_allocation_percentage = base_allocation_percentage * 1.15 # Example: Slightly increase allocation
+                current_trailing_percent = 10.0  # Example: Tighter trailing stop
                 print(f"🔷 Low VIX ({current_vix:.2f}): Adjusting allocation to {current_allocation_percentage*100:.1f}%, trailing stop to {current_trailing_percent}%.")
             else: # Normal VIX range
                 print(f"🔷 Normal VIX ({current_vix:.2f}): Using default allocation {current_allocation_percentage*100:.1f}%, trailing stop {current_trailing_percent}%.")
