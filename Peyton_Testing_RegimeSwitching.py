@@ -1,4 +1,4 @@
-from ib_insync import *
+from ib_insync import IB, util, MarketOrder, Option, Contract # Using * can cause issues later on if updates happen
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 import yfinance as yf
@@ -46,8 +46,7 @@ def is_market_open():
 # =========================
 # 📈 Get SPY Price from Yahoo
 # =========================
-def get_spy_price():
-    spy = yf.Ticker("SPY")
+def get_spy_price(spy_ticker):
     data = spy.history(period="1d", interval="1m")
     if data.empty:
         print("⚠️ No price data.")
@@ -61,8 +60,7 @@ def get_spy_price():
 # =========================
 # 📊 Technical Indicators
 # =========================
-def get_tech_indicators():
-    spy = yf.Ticker("SPY")
+def get_tech_indicators(spy_ticker):
     data = spy.history(period="3d", interval="5m")
     if data.empty:
         print("⚠️ Failed to fetch historical data for indicators.")
@@ -78,8 +76,7 @@ def get_tech_indicators():
 # =========================
 # 💸 Option Price from Yahoo
 # =========================
-def get_option_price_yahoo(expiry, strike, direction):
-    spy = yf.Ticker("SPY")
+def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
     try:
         opt_chain = spy.option_chain(expiry)
         chain = opt_chain.calls if direction == 'C' else opt_chain.puts
@@ -178,13 +175,15 @@ def close_position(contract):
                 position_closed = False
                 break
             
-    if not any(p.contract.conId == contract.conId for p in ib.positions()):
-        if not position_closed : # If loop didn't confirm 'Filled' but position is gone
-             print(f"ℹ️ Position for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'} no longer found, assuming closed or manually handled.")
-             # position_closed = True # Uncomment if you want this to be treated as success
-    elif not position_closed and any(p.contract.conId == contract.conId and p.position != 0 for p in ib.positions()):
-         print(f"⚠️ No matching open position found to close for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}, or it was not processed.")
-         # position_closed remains False # Same as above
+    final_position_exists = any(p.contract.conId == contract.conId and p.position != 0 for p in ib.positions())
+
+    if not final_position_exists and not position_closed:
+        # This case handles when the order didn't confirm as 'Filled' but the position is gone anyway.
+        print(f"ℹ️ Position for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'} no longer found. Assuming it was closed.")
+        position_closed = True # We can now confidently say it's closed.
+    elif not position_closed and not final_position_exists:
+        # This covers the case where the loop was never entered because the position didn't exist to begin with.
+        print(f"⚠️ No matching open position was found to close.")
 
     return position_closed
 
@@ -249,12 +248,14 @@ def trade_spy_options():
         print("⏰ Market is closed. Skipping trade evaluation.")
         return
 
-    price, _ = get_spy_price()
+    spy_ticker = yf.Ticker("SPY")
+    
+    price, _ = get_spy_price(spy_ticker)
     if price is None:
         send_email("Bot Error - SPY Price", "Failed to fetch SPY price. Trade aborted.")
         return
 
-    sma, rsi = get_tech_indicators()
+    sma, rsi = get_tech_indicators(spy_ticker)
     if sma is None or rsi is None or math.isnan(sma) or math.isnan(rsi):
         send_email("Bot Error - Indicators", "Failed to fetch valid indicators (SMA or RSI). Trade aborted.")
         return
@@ -349,7 +350,6 @@ def trade_spy_options():
 
 
     # --- Option Selection and Trade Execution ---
-    spy_ticker = yf.Ticker("SPY")
     available_expiries = spy_ticker.options
     if len(available_expiries) < 2:
         print("⚠️ Not enough expiry dates available for SPY options. Skipping trade.")
@@ -358,7 +358,7 @@ def trade_spy_options():
     expiry = available_expiries[1]
     strike = round(price)
 
-    option_price = get_option_price_yahoo(expiry, strike, direction)
+    option_price = get_option_price_yahoo(spy_ticker, expiry, strike, direction)
     if option_price is None or option_price <= 0 or math.isnan(option_price):
         print(f"⚠️ Invalid or zero option price (${option_price}) for {direction} {strike} {expiry}. Skipping trade.")
         send_email("Trade Error - Option Price", f"Option price for {direction} {strike} {expiry} is invalid (${option_price}). Skipping trade.")
