@@ -1,0 +1,6 @@
+ib-insync
+ta
+yfinance
+pytz
+python-dotenv
+coloredlogs
