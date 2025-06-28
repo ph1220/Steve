@@ -4,3 +4,4 @@ yfinance
 pytz
 python-dotenv
 coloredlogs
+textual
