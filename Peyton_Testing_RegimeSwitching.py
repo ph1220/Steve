@@ -10,6 +10,8 @@ import smtplib
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 import math
+import logging
+import coloredlogs
 
 # =========================
 # 🔐 Load ENV Variables
@@ -17,6 +19,27 @@ import math
 load_dotenv()
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
+
+# =========================
+# 📝 Configure Logging
+# =========================
+# 1. Get the root logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO) # Set the lowest level to capture
+
+# 2. Create a handler for writing to the log file
+file_handler = logging.FileHandler("peyton_test_trading_bot.log")
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# 3. Install coloredlogs for the console output
+# This will automatically create and add a colored StreamHandler
+coloredlogs.install(
+    level='INFO',
+    logger=logger,
+    fmt='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # =========================
 # 📧 Email Alert
@@ -31,9 +54,9 @@ def send_email(subject, body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(EMAIL_USER, EMAIL_PASS)
             server.send_message(msg)
-        print("✅ Email sent!")
+        logging.info("✅ Email sent!")
     except Exception as e:
-        print(f"❌ Email error: {e}")
+        logging.error(f"❌ Email error: {e}")
 
 # =========================
 # ⏰ Market Hours Check
@@ -47,30 +70,30 @@ def is_market_open():
 # 📈 Get SPY Price from Yahoo
 # =========================
 def get_spy_price(spy_ticker):
-    data = spy.history(period="1d", interval="1m")
+    data = spy_ticker.history(period="1d", interval="1m")
     if data.empty:
-        print("⚠️ No price data.")
+        logging.warning("⚠️ No price data.")
         return None, None
     latest = data.iloc[-1]
     price = latest['Close']
     timestamp = latest.name
-    print(f"💰 SPY Price: {price} at {timestamp}")
+    logging.info(f"💰 SPY Price: {price} at {timestamp}")
     return price, timestamp
 
 # =========================
 # 📊 Technical Indicators
 # =========================
 def get_tech_indicators(spy_ticker):
-    data = spy.history(period="3d", interval="5m")
+    data = spy_ticker.history(period="3d", interval="5m")
     if data.empty:
-        print("⚠️ Failed to fetch historical data for indicators.")
+        logging.warning("⚠️ Failed to fetch historical data for indicators.")
         return None, None
 
     close = data['Close']
     sma = SMAIndicator(close, window=14).sma_indicator().iloc[-1]
     rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
 
-    print(f"📈 SMA: {sma:.2f} | RSI: {rsi:.2f}")
+    logging.info(f"📈 SMA: {sma:.2f} | RSI: {rsi:.2f}")
     return sma, rsi
 
 # =========================
@@ -78,12 +101,12 @@ def get_tech_indicators(spy_ticker):
 # =========================
 def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
     try:
-        opt_chain = spy.option_chain(expiry)
+        opt_chain = spy_ticker.option_chain(expiry)
         chain = opt_chain.calls if direction == 'C' else opt_chain.puts
 
         opt = chain[chain['strike'] == strike]
         if opt.empty:
-            print(f"⚠️ Option not found for strike {strike} and expiry {expiry}.")
+            logging.warning(f"⚠️ Option not found for strike {strike} and expiry {expiry}.")
             return None
 
         bid = opt['bid'].values[0]
@@ -93,20 +116,20 @@ def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
         if (bid == 0 and ask == 0) and last > 0:
             mid = last
         elif bid == 0 and ask == 0 and last == 0:
-            print("⚠️ Option has no bid, ask, or last price. Unreliable.")
+            logging.warning("⚠️ Option has no bid, ask, or last price. Unreliable.")
             return None
         else:
             mid = round((bid + ask) / 2, 2)
 
         if mid <= 0:
-            print(f"⚠️ Invalid option mid-price ({mid}). Bid: {bid}, Ask: {ask}, Last: {last}")
+            logging.warning(f"⚠️ Invalid option mid-price ({mid}). Bid: {bid}, Ask: {ask}, Last: {last}")
             return None
 
-        print(f"💵 Option Price ({direction} {strike} {expiry}): Bid={bid} | Ask={ask} | Mid={mid}")
+        logging.info(f"💵 Option Price ({direction} {strike} {expiry}): Bid={bid} | Ask={ask} | Mid={mid}")
         return mid
 
     except Exception as e:
-        print(f"❌ Failed to fetch option price for {direction} {strike} {expiry}: {e}")
+        logging.error(f"❌ Failed to fetch option price for {direction} {strike} {expiry}: {e}")
         return None
 
 # =========================
@@ -114,7 +137,7 @@ def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
 # =========================
 def get_account_balance():
     if not ib.isConnected():
-        print("⚠️ IB not connected. Cannot fetch account balance.")
+        logging.warning("⚠️ IB not connected. Cannot fetch account balance.")
         return 0
     try:
         account_summary = ib.accountSummary()
@@ -124,20 +147,20 @@ def get_account_balance():
         if cash_row.empty:
             cash_row = df[df['tag'] == 'NetLiquidation'] # Try without currency constraint
             if cash_row.empty:
-                 print("⚠️ Could not fetch 'NetLiquidation' from account summary.")
+                 logging.warning("⚠️ Could not fetch 'NetLiquidation' from account summary.")
                  return 0
         
         cash_value_str = cash_row['value'].values[0]
         if cash_value_str:
             cash = float(cash_value_str)
-            print(f"💵 Account Balance (Net Liquidation): ${cash}")
+            logging.info(f"💵 Account Balance (Net Liquidation): ${cash}")
             return cash
         else:
-            print("⚠️ 'NetLiquidation' value is empty.")
+            logging.warning("⚠️ 'NetLiquidation' value is empty.")
             return 0
 
     except Exception as e:
-        print(f"❌ Error fetching account balance: {e}")
+        logging.error(f"❌ Error fetching account balance: {e}")
         return 0
 
 
@@ -146,7 +169,7 @@ def get_account_balance():
 # =========================
 def close_position(contract):
     if not ib.isConnected():
-        print("⚠️ IB not connected. Cannot close position.")
+        logging.warning("⚠️ IB not connected. Cannot close position.")
         return False
 
     positions = ib.positions()
@@ -158,19 +181,19 @@ def close_position(contract):
 
             order = MarketOrder(action, qty_to_close)
             trade = ib.placeOrder(contract, order)
-            print(f"📤 {action} order placed to close {qty_to_close} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}.")
+            logging.info(f"📤 {action} order placed to close {qty_to_close} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}.")
 
             trade = wait_for_trade_completion(ib, trade)
 
             if trade.orderStatus.status == 'Filled':
                 msg = f"✅ Position closed: {trade.orderStatus.avgFillPrice} x {trade.orderStatus.filled} for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}. Status: {trade.orderStatus.status}"
-                print(msg)
+                logging.info(msg)
                 send_email(f"Position Closed - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", msg)
                 position_closed = True
                 break
             else:
                 msg = f"❌ Failed to confirm close for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'} (Status: {trade.orderStatus.status}, Reason: {trade.orderStatus.whyHeld})"
-                print(msg)
+                logging.error(msg)
                 send_email(f"Close Error - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", msg)
                 position_closed = False
                 break
@@ -179,11 +202,11 @@ def close_position(contract):
 
     if not final_position_exists and not position_closed:
         # This case handles when the order didn't confirm as 'Filled' but the position is gone anyway.
-        print(f"ℹ️ Position for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'} no longer found. Assuming it was closed.")
+        logging.info(f"ℹ️ Position for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'} no longer found. Assuming it was closed.")
         position_closed = True # We can now confidently say it's closed.
     elif not position_closed and not final_position_exists:
         # This covers the case where the loop was never entered because the position didn't exist to begin with.
-        print(f"⚠️ No matching open position was found to close.")
+        logging.warning(f"⚠️ No matching open position was found to close.")
 
     return position_closed
 
@@ -198,42 +221,42 @@ def wait_for_trade_completion(ib_instance, trade, max_wait_sec=60):
 # =========================
 # ⏳ Trailing Stop Monitor (Yahoo Powered)
 # =========================
-def monitor_position_with_trailing(strike, direction, expiry, entry_price, contract, dynamic_trailing_percent):
+def monitor_position_with_trailing(spy_ticker ,strike, direction, expiry, entry_price, contract, dynamic_trailing_percent):
     highest_price = entry_price
     contract_display_name = contract.localSymbol if hasattr(contract, 'localSymbol') else f"{contract.symbol} {strike}{direction} {expiry}"
 
-    print(f"🛡️ Monitoring {contract_display_name} with entry {entry_price:.2f}, initial trailing stop at {dynamic_trailing_percent}%.")
+    logging.info(f"🛡️ Monitoring {contract_display_name} with entry {entry_price:.2f}, initial trailing stop at {dynamic_trailing_percent}%.")
 
     while True:
         if not is_market_open():
-            print(f"⏰ Market closed while monitoring {contract_display_name}. Attempting to close position.")
+            logging.info(f"⏰ Market closed while monitoring {contract_display_name}. Attempting to close position.")
             if not close_position(contract):
                 error_msg = f"ALERT: Attempt to close {contract_display_name} at EOD did not confirm 'Filled'."
-                print(error_msg)
+                logging.error(error_msg)
                 send_email(f"Potential Issue: EOD Close - {contract_display_name}", error_msg)
             break # Exit monitoring loop
 
-        current_price = get_option_price_yahoo(expiry, strike, direction)
+        current_price = get_option_price_yahoo(spy_ticker, expiry, strike, direction)
 
         if current_price is None:
-            print(f"⚠️ No price data for {contract_display_name}, retrying in 10s...")
+            logging.warning(f"⚠️ No price data for {contract_display_name}, retrying in 10s...")
             time.sleep(10)
             continue
 
         if current_price > highest_price:
             highest_price = current_price
-            print(f"🔺 New High for {contract_display_name}: {highest_price:.2f}")
+            logging.info(f"🔺 New High for {contract_display_name}: {highest_price:.2f}")
 
         stop_price = highest_price * (1 - dynamic_trailing_percent / 100)
         stop_price = round(stop_price, 2)
 
-        print(f"📊 {contract_display_name} - Current: {current_price:.2f} | High: {highest_price:.2f} | Stop: {stop_price:.2f} (Trail: {dynamic_trailing_percent}%)")
+        logging.info(f"📊 {contract_display_name} - Current: {current_price:.2f} | High: {highest_price:.2f} | Stop: {stop_price:.2f} (Trail: {dynamic_trailing_percent}%)")
 
         if current_price <= stop_price:
-            print(f"🛑 Trailing stop hit for {contract_display_name} at {current_price:.2f} (Stop: {stop_price:.2f})! Attempting to close...")
+            logging.warning(f"🛑 Trailing stop hit for {contract_display_name} at {current_price:.2f} (Stop: {stop_price:.2f})! Attempting to close...")
             if not close_position(contract):
                 error_msg = f"ALERT: Attempt to close {contract_display_name} on stop-loss did not confirm 'Filled'."
-                print(error_msg)
+                logging.error(error_msg)
                 send_email(f"Potential Issue: Stop Loss Close - {contract_display_name}", error_msg)
             break
 
@@ -245,7 +268,7 @@ def monitor_position_with_trailing(strike, direction, expiry, entry_price, contr
 def trade_spy_options():
     # --- Essential Pre-checks ---
     if not is_market_open():
-        print("⏰ Market is closed. Skipping trade evaluation.")
+        logging.info("⏰ Market is closed. Skipping trade evaluation.")
         return
 
     spy_ticker = yf.Ticker("SPY")
@@ -266,12 +289,12 @@ def trade_spy_options():
         vix_data = vix_ticker.history(period="1d") # gets the latest closing VIX
         if not vix_data.empty:
             current_vix = vix_data['Close'].iloc[-1]
-            print(f"📊 Current VIX: {current_vix:.2f}")
+            logging.info(f"📊 Current VIX: {current_vix:.2f}")
         else:
-            print("⚠️ Could not fetch VIX data. Defaulting to normal VIX logic for signals and risk.")
+            logging.warning("⚠️ Could not fetch VIX data. Defaulting to normal VIX logic for signals and risk.")
             send_email("Bot Warning - VIX Fetch", "Could not fetch VIX data. Using default parameters.")
     except Exception as e:
-        print(f"❌ Error fetching VIX: {e}. Defaulting to normal VIX logic for signals and risk.")
+        logging.error(f"❌ Error fetching VIX: {e}. Defaulting to normal VIX logic for signals and risk.")
         send_email("Bot Error - VIX Fetch", f"Error fetching VIX: {str(e)}. Using default parameters.")
 
 # --- CHANGE THESE VALUES HERE ONLY ---
@@ -295,7 +318,7 @@ def trade_spy_options():
     trade_rationale = ""
 
     if current_vix is not None and current_vix > strategy_config["VIX_HIGH_SIGNAL_THRESHOLD"]:
-        print(f"🔶 High VIX ({current_vix:.2f}): Applying High VIX (Mean Reversion) signal logic.")
+        logging.info(f"🔶 High VIX ({current_vix:.2f}): Applying High VIX (Mean Reversion) signal logic.")
         if rsi < strategy_config["RSI_HIGH_VIX_OVERSOLD"]:
             direction = "C" # Buy Call on extreme oversold
             trade_rationale = f"High VIX Mean Reversion: RSI {rsi:.2f} < {strategy_config['RSI_HIGH_VIX_OVERSOLD']}"
@@ -309,7 +332,7 @@ def trade_spy_options():
         elif current_vix < strategy_config["VIX_HIGH_SIGNAL_THRESHOLD"] : # Covers low and normal
              vix_status_for_signal = f"VIX {current_vix:.2f}"
 
-        print(f"🔷 {vix_status_for_signal}: Applying Standard Trend signal logic.")
+        logging.info(f"🔷 {vix_status_for_signal}: Applying Standard Trend signal logic.")
         if price > sma and rsi < strategy_config["RSI_STD_OVERBOUGHT"]:
             direction = "C"
             trade_rationale = f"Standard Trend: Price > SMA, RSI {rsi:.2f} < {strategy_config['RSI_STD_OVERBOUGHT']}"
@@ -318,10 +341,10 @@ def trade_spy_options():
             trade_rationale = f"Standard Trend: Price < SMA, RSI {rsi:.2f} > {strategy_config['RSI_STD_OVERSOLD']}"
 
     if direction is None:
-        print(f"🚦 No trade signal based on current logic (VIX: {current_vix if current_vix else 'N/A'}, RSI: {rsi:.2f}, Price/SMA: {price:.2f}/{sma:.2f}).")
+        logging.info(f"🚦 No trade signal based on current logic (VIX: {current_vix if current_vix else 'N/A'}, RSI: {rsi:.2f}, Price/SMA: {price:.2f}/{sma:.2f}).")
         return
 
-    print(f"🚀 Trade Signal: {direction} | Rationale: {trade_rationale}")
+    logging.info(f"🚀 Trade Signal: {direction} | Rationale: {trade_rationale}")
 
     # --- Dynamic Risk Adjustment Based On VIX ---
     base_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"]
@@ -335,24 +358,24 @@ def trade_spy_options():
             current_allocation_percentage = base_allocation_percentage * strategy_config["HIGH_VIX_ALLOCATION_MULT"]
             current_trailing_percent = strategy_config["HIGH_VIX_TRAILING_STOP"]
             vix_risk_profile = f"High VIX ({current_vix:.2f})"
-            print(f"🔶 {vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
+            logging.info(f"🔶 {vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
         elif current_vix < strategy_config["VIX_LOW_RISK_THRESHOLD"]:
             current_allocation_percentage = base_allocation_percentage * strategy_config["LOW_VIX_ALLOCATION_MULT"]
             current_trailing_percent = strategy_config["LOW_VIX_TRAILING_STOP"]
             vix_risk_profile = f"Low VIX ({current_vix:.2f})"
-            print(f"🔷 {vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
+            logging.info(f"🔷 {vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
         else: # Normal VIX range
             vix_risk_profile = f"Normal VIX ({current_vix:.2f})"
-            print(f"🔷 {vix_risk_profile}: Using default risk - Allocation {current_allocation_percentage*100:.1f}%, Trailing {current_trailing_percent}%.")
+            logging.info(f"🔷 {vix_risk_profile}: Using default risk - Allocation {current_allocation_percentage*100:.1f}%, Trailing {current_trailing_percent}%.")
     else:
-        print("⚠️ VIX data not available for risk adjustment, using default risk parameters.")
+        logging.warning("⚠️ VIX data not available for risk adjustment, using default risk parameters.")
         vix_risk_profile = "VIX N/A (Default Risk)"
 
 
     # --- Option Selection and Trade Execution ---
     available_expiries = spy_ticker.options
     if len(available_expiries) < 2:
-        print("⚠️ Not enough expiry dates available for SPY options. Skipping trade.")
+        logging.warning("⚠️ Not enough expiry dates available for SPY options. Skipping trade.")
         send_email("Trade Error - Expiry", "Not enough SPY option expiry dates available.")
         return
     expiry = available_expiries[1]
@@ -360,7 +383,7 @@ def trade_spy_options():
 
     option_price = get_option_price_yahoo(spy_ticker, expiry, strike, direction)
     if option_price is None or option_price <= 0 or math.isnan(option_price):
-        print(f"⚠️ Invalid or zero option price (${option_price}) for {direction} {strike} {expiry}. Skipping trade.")
+        logging.warning(f"⚠️ Invalid or zero option price (${option_price}) for {direction} {strike} {expiry}. Skipping trade.")
         send_email("Trade Error - Option Price", f"Option price for {direction} {strike} {expiry} is invalid (${option_price}). Skipping trade.")
         return
 
@@ -373,55 +396,55 @@ def trade_spy_options():
         currency='USD'
     )
     
-    print(f"Qualifying contract: {contract.symbol} {contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}")
+    logging.info(f"Qualifying contract: {contract.symbol} {contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}")
     qualified_contracts = ib.qualifyContracts(contract)
     if not qualified_contracts:
-        print(f"⚠️ Contract could not be qualified: {contract}. Skipping trade.")
+        logging.warning(f"⚠️ Contract could not be qualified: {contract}. Skipping trade.")
         send_email("Trade Error - Qualification", f"Failed to qualify contract: {contract}")
         return
     contract = qualified_contracts[0]
-    print(f"📄 Qualified Contract: {contract.localSymbol if hasattr(contract, 'localSymbol') else contract}")
+    logging.info(f"📄 Qualified Contract: {contract.localSymbol if hasattr(contract, 'localSymbol') else contract}")
 
 
     balance = get_account_balance()
     if balance <= 0:
-        print("⚠️ Account balance is zero or could not be fetched. Skipping trade.")
+        logging.warning("⚠️ Account balance is zero or could not be fetched. Skipping trade.")
         send_email("Trade Error - Balance", "Account balance is zero or could not be fetched.")
         return
 
     allocation_amount = balance * current_allocation_percentage
-    print(f"💵 Calculated allocation amount: ${allocation_amount:.2f} ({current_allocation_percentage*100:.1f}% of balance ${balance:.2f})")
+    logging.info(f"💵 Calculated allocation amount: ${allocation_amount:.2f} ({current_allocation_percentage*100:.1f}% of balance ${balance:.2f})")
 
     cost_per_contract = option_price * 100 # Options are typically for 100 shares
     if cost_per_contract <= 0 :
-        print(f"⚠️ Cost per contract is zero or negative (${cost_per_contract:.2f}). Skipping trade.")
+        logging.warning(f"⚠️ Cost per contract is zero or negative (${cost_per_contract:.2f}). Skipping trade.")
         send_email("Trade Error - Contract Cost", f"Cost per contract is ${cost_per_contract:.2f}. Skipping trade.")
         return
 
     qty = math.floor(allocation_amount / cost_per_contract)
 
     if qty < 1:
-        print(f"⚠️ Not enough balance for {current_allocation_percentage*100:.1f}% allocation. Need ${cost_per_contract:.2f} for 1 contract (Option Price: ${option_price:.2f}), have ${allocation_amount:.2f} allocated for trade. Balance: ${balance:.2f}")
+        logging.warning(f"⚠️ Not enough balance for {current_allocation_percentage*100:.1f}% allocation. Need ${cost_per_contract:.2f} for 1 contract (Option Price: ${option_price:.2f}), have ${allocation_amount:.2f} allocated for trade. Balance: ${balance:.2f}")
         send_email("Trade Info - Insufficient Allocation", f"Insufficient funds for 1 contract at current allocation. Need ${cost_per_contract:.2f}, allocated ${allocation_amount:.2f}.")
         return
 
-    print(f"🧮 Attempting to buy {qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ~${option_price:.2f} each. (Risk Profile: {vix_risk_profile})")
+    logging.info(f"🧮 Attempting to buy {qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ~${option_price:.2f} each. (Risk Profile: {vix_risk_profile})")
 
     order = MarketOrder('BUY', qty)
     trade = ib.placeOrder(contract, order)
-    print(f"📥 Buy order placed for {qty} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'}.")
+    logging.info(f"📥 Buy order placed for {qty} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'}.")
 
     trade = wait_for_trade_completion(ib, trade)
 
     if trade.orderStatus.status != 'Filled':
         msg = f"❌ Buy order for {qty} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} failed or not filled. Status: {trade.orderStatus.status}, Reason: {trade.orderStatus.whyHeld}"
-        print(msg)
+        logging.error(msg)
         send_email(f"Trade Error - Buy Order {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'}", msg)
         return
 
     entry_price_filled = trade.orderStatus.avgFillPrice
     filled_qty = trade.orderStatus.filled
-    print(f"✅ Entry filled: {filled_qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ${entry_price_filled:.2f} each.")
+    logging.info(f"✅ Entry filled: {filled_qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ${entry_price_filled:.2f} each.")
 
     email_subject = f"Trade Executed: {direction} {qty} {contract.localSymbol if hasattr(contract, 'localSymbol') else 'SPY Option'}"
     email_body = (
@@ -437,23 +460,23 @@ def trade_spy_options():
     send_email(email_subject, email_body)
 
     # Pass contract to the monitoring function
-    monitor_position_with_trailing(strike, direction, expiry, entry_price_filled, contract, current_trailing_percent)
+    monitor_position_with_trailing(spy_ticker, strike, direction, expiry, entry_price_filled, contract, current_trailing_percent)
 
 # =========================
 # 🔄 Main Loop
 # =========================
 ib = IB()
 try:
-    print("Attempting to connect to IBKR...")
+    logging.info("Attempting to connect to IBKR...")
     # Increased clientId to avoid conflicts if other apps are running
     ib.connect('127.0.0.1', 7497, clientId=int(time.time() % 1000) + 100)
-    print(f"🔗 Connected to IBKR with Client ID: {ib.clientId}.")
+    logging.info(f"🔗 Connected to IBKR with Client ID: {ib.clientId}.")
 
     while True:
         current_time_eastern = datetime.now(pytz.timezone('US/Eastern')).time()
-        print(f"\n--- Main Loop Iteration ({datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
+        logging.info(f"\n--- Main Loop Iteration ({datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
         if is_market_open():
-            print("Market is open. Checking for trading opportunities...")
+            logging.info("Market is open. Checking for trading opportunities...")
             try:
                 # Ensure we have the latest account summary before trading logic
                 # This is important if the balance changes due to other activities
@@ -473,7 +496,7 @@ try:
                     # which is cleaner than mixing logic and logging in the check itself.
                     for pos in current_positions:
                          if pos.contract.symbol == 'SPY' and pos.contract.secType == 'OPT' and pos.position != 0:
-                            print(f"⚠️ Active SPY option position found: {pos.contract.localSymbol if hasattr(pos.contract, 'localSymbol') else pos.contract.symbol} Quantity: {pos.position}. Skipping new trade initiation.")
+                            logging.warning(f"⚠️ Active SPY option position found: {pos.contract.localSymbol if hasattr(pos.contract, 'localSymbol') else pos.contract.symbol} Quantity: {pos.position}. Skipping new trade initiation.")
                             break
                 
                 if not spy_option_position_open:
@@ -490,36 +513,36 @@ try:
                 error_message = f"⚠️ Main loop error during trade evaluation: {e}"
                 import traceback
                 tb_str = traceback.format_exc()
-                print(error_message)
-                print(tb_str)
+                logging.error(error_message)
+                logging.info(tb_str)
                 send_email("Bot Runtime Error - Main Loop", f"{error_message}\n\nTraceback:\n{tb_str}")
         else:
-            print(f"⏰ Market closed (Current Eastern Time: {current_time_eastern}). Sleeping...")
+            logging.info(f"⏰ Market closed (Current Eastern Time: {current_time_eastern}). Sleeping...")
             if dtime(16, 0) <= current_time_eastern < dtime(16, 5):
                  open_positions = ib.positions()
                  for pos in open_positions:
                      if pos.contract.symbol == 'SPY' and pos.contract.secType == 'OPT' and pos.position != 0:
                          contract_display_name = pos.contract.localSymbol if hasattr(pos.contract, 'localSymbol') else f"{pos.contract.symbol} Option"
                          eod_warning_msg = f"EOD WARNING: Position in {contract_display_name} (Qty: {pos.position}) is still open after market close."
-                         print(eod_warning_msg)
+                         logging.warning(eod_warning_msg)
                          send_email(f"EOD Alert: Open Position - {contract_display_name}", eod_warning_msg)
 
         main_loop_sleep_seconds = 300 # 5 minutes
-        print(f"--- End of Loop Iteration. Sleeping for {main_loop_sleep_seconds // 60} minutes. ---")
+        logging.info(f"--- End of Loop Iteration. Sleeping for {main_loop_sleep_seconds // 60} minutes. ---")
         time.sleep(main_loop_sleep_seconds)
 
 except ConnectionRefusedError:
-    print(f"❌ IBKR Connection Refused. Ensure TWS/Gateway is running, API connections are enabled, and correct port/IP.")
+    logging.error(f"❌ IBKR Connection Refused. Ensure TWS/Gateway is running, API connections are enabled, and correct port/IP.")
     send_email("Bot Critical Error - Connection", "IBKR Connection Refused.")
 except Exception as e:
     import traceback
     tb_str = traceback.format_exc()
-    print(f"❌ Main loop or connection critical error: {e}")
-    print(tb_str)
+    logging.error(f"❌ Main loop or connection critical error: {e}")
+    logging.info(tb_str)
     send_email("Bot Critical Error - Main", f"Main loop or connection error: {str(e)}\n\nTraceback:\n{tb_str}")
 finally:
     if ib.isConnected():
-        print("🔗 Disconnecting from IBKR.")
+        logging.info("🔗 Disconnecting from IBKR.")
         ib.disconnect()
     else:
-        print("🔗 Was not connected to IBKR or already disconnected.")
+        logging.info("🔗 Was not connected to IBKR or already disconnected.")
