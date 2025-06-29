@@ -1,0 +1,33 @@
+Screen {
+    layout: grid;
+    grid-size: 3 1;
+    grid-gutter: 1;
+}
+
+#log_viewer {
+    column-span: 2;
+    border: round $primary;
+}
+
+#settings_panel {
+    column-span: 1;
+    height: 100%;
+    border: round $primary;
+    padding: 0 1;
+}
+
+.title {
+    content-align: center middle;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+.label {
+    text-style: bold;
+    padding-top: 1;
+}
+
+Button {
+    width: 100%;
+    margin-top: 1;
+}
