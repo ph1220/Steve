@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import math
 import logging
 import coloredlogs
+import json
 
 # =========================
 #   Load ENV Variables
@@ -58,6 +59,45 @@ def send_email(subject, body):
     except Exception as e:
         logging.error(f"Email error: {e}")
 
+
+STATE_FILE = "trade_state.json"
+
+def save_trade_state(contract, entry_price, quantity, trailing_percent):
+    """Saves the active trade's state to a file."""
+    state = {
+        "is_position_open": True,
+        # util.contract_to_dict converts the IB contract object into a savable format
+        "contract": util.contract_to_dict(contract),
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "trailing_percent": trailing_percent
+    }
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=4)
+    logging.info(f"Trade state saved for {contract.localSymbol}.")
+
+def load_trade_state():
+    """Loads the trade state from a file."""
+    if not os.path.exists(STATE_FILE):
+        return {"is_position_open": False} # Default state if no file exists
+    try:
+        with open(STATE_FILE, 'r') as f:
+            state = json.load(f)
+            # Convert the dictionary back into an ib_insync Contract object
+            if state.get("is_position_open"):
+                state['contract'] = Contract(**state['contract'])
+            return state
+    except (json.JSONDecodeError, IOError) as e:
+        logging.error(f"Error loading state file: {e}. Resetting state.")
+        return {"is_position_open": False}
+
+def clear_trade_state():
+    """Clears the trade state by resetting the file."""
+    state = {"is_position_open": False}
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=4)
+    logging.info("Trade state has been cleared.")
+
 # =========================
 #   Market Hours Check
 # =========================
@@ -65,6 +105,35 @@ def is_market_open():
     eastern = pytz.timezone('US/Eastern')
     now = datetime.now(eastern).time()
     return dtime(9, 30) <= now <= dtime(16, 0)
+
+# =========================
+#    Option Snapshot from IBKR
+# =========================
+def get_option_snapshot(contract):
+    """
+    Fetches a full market data snapshot (ticker) for a contract from IBKR.
+    This includes price, volume, open interest, etc.
+
+    Args:
+        contract: The ib_insync Contract object.
+
+    Returns:
+        The Ticker object if successful, otherwise None.
+    """
+    
+    ticker = ib.reqMktData(contract, '', True, False)
+    
+    ib.sleep(2) 
+
+    if ticker is None:
+        logging.warning(f"IBKR did not return a ticker object for {contract.localSymbol}.")
+        return None
+    
+    if ticker.last != ticker.last and ticker.bid != ticker.bid: # Check for NaN on both last and bid
+        logging.warning(f"Ticker for {contract.localSymbol} returned but contains no valid data.")
+        return None
+
+    return ticker
 
 # =========================
 #    Get SPY Price from Yahoo
@@ -97,40 +166,40 @@ def get_tech_indicators(spy_ticker):
     return sma, rsi
 
 # =========================
-#    Option Price from Yahoo
+#    Option Price from Yahoo (OLD AND NO LONGER USED BUT NOT DELETING YET JUST IN CASE)
 # =========================
-def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
-    try:
-        opt_chain = spy_ticker.option_chain(expiry)
-        chain = opt_chain.calls if direction == 'C' else opt_chain.puts
-
-        opt = chain[chain['strike'] == strike]
-        if opt.empty:
-            logging.warning(f"Option not found for strike {strike} and expiry {expiry}.")
-            return None
-
-        bid = opt['bid'].values[0]
-        ask = opt['ask'].values[0]
-        last = opt['lastPrice'].values[0]
-
-        if (bid == 0 and ask == 0) and last > 0:
-            mid = last
-        elif bid == 0 and ask == 0 and last == 0:
-            logging.warning("Option has no bid, ask, or last price. Unreliable.")
-            return None
-        else:
-            mid = round((bid + ask) / 2, 2)
-
-        if mid <= 0:
-            logging.warning(f"Invalid option mid-price ({mid}). Bid: {bid}, Ask: {ask}, Last: {last}")
-            return None
-
-        logging.info(f"Option Price ({direction} {strike} {expiry}): Bid={bid} | Ask={ask} | Mid={mid}")
-        return mid
-
-    except Exception as e:
-        logging.error(f"Failed to fetch option price for {direction} {strike} {expiry}: {e}")
-        return None
+# def get_option_price_yahoo(spy_ticker, expiry, strike, direction):
+#    try:
+#        opt_chain = spy_ticker.option_chain(expiry)
+#         chain = opt_chain.calls if direction == 'C' else opt_chain.puts
+# 
+#         opt = chain[chain['strike'] == strike]
+#         if opt.empty:
+#             logging.warning(f"Option not found for strike {strike} and expiry {expiry}.")
+#             return None
+# 
+#         bid = opt['bid'].values[0]
+#         ask = opt['ask'].values[0]
+#         last = opt['lastPrice'].values[0]
+#
+#         if (bid == 0 and ask == 0) and last > 0:
+#             mid = last
+#         elif bid == 0 and ask == 0 and last == 0:
+#             logging.warning("Option has no bid, ask, or last price. Unreliable.")
+#             return None
+#         else:
+#             mid = round((bid + ask) / 2, 2)
+#
+#         if mid <= 0:
+#             logging.warning(f"Invalid option mid-price ({mid}). Bid: {bid}, Ask: {ask}, Last: {last}")
+#             return None
+#
+#         logging.info(f"Option Price ({direction} {strike} {expiry}): Bid={bid} | Ask={ask} | Mid={mid}")
+#         return mid
+#
+#     except Exception as e:
+#         logging.error(f"Failed to fetch option price for {direction} {strike} {expiry}: {e}")
+#         return None
 
 # =========================
 #    Account Balance
@@ -189,6 +258,7 @@ def close_position(contract):
                 msg = f"Position closed: {trade.orderStatus.avgFillPrice} x {trade.orderStatus.filled} for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}. Status: {trade.orderStatus.status}"
                 logging.info(msg)
                 send_email(f"Position Closed - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", msg)
+                clear_trade_state()
                 position_closed = True
                 break
             else:
@@ -219,11 +289,11 @@ def wait_for_trade_completion(ib_instance, trade, max_wait_sec=60):
     return trade
 
 # =========================
-#   Trailing Stop Monitor (Yahoo Powered)
+#   Trailing Stop Monitor (IBKR Paper-Trading Powered)
 # =========================
-def monitor_position_with_trailing(spy_ticker ,strike, direction, expiry, entry_price, contract, dynamic_trailing_percent):
+def monitor_position_with_trailing(contract, entry_price, dynamic_trailing_percent):
     highest_price = entry_price
-    contract_display_name = contract.localSymbol if hasattr(contract, 'localSymbol') else f"{contract.symbol} {strike}{direction} {expiry}"
+    contract_display_name = contract.localSymbol
 
     logging.info(f"Monitoring {contract_display_name} with entry {entry_price:.2f}, initial trailing stop at {dynamic_trailing_percent}%.")
 
@@ -234,13 +304,25 @@ def monitor_position_with_trailing(spy_ticker ,strike, direction, expiry, entry_
                 error_msg = f"ALERT: Attempt to close {contract_display_name} at EOD did not confirm 'Filled'."
                 logging.error(error_msg)
                 send_email(f"Potential Issue: EOD Close - {contract_display_name}", error_msg)
-            break # Exit monitoring loop
+            break
 
-        current_price = get_option_price_yahoo(spy_ticker, expiry, strike, direction)
+        ticker = get_option_snapshot(contract)
 
-        if current_price is None:
-            logging.warning(f"No price data for {contract_display_name}, retrying in 10s...")
-            time.sleep(10)
+        if ticker is None:
+            logging.warning(f"Could not get a valid snapshot for {contract_display_name}. Retrying in 15s...")
+            ib.sleep(15) 
+            continue
+        
+        # Extract the price from the ticker
+        current_price = ticker.last
+        if current_price != current_price: # Check for NaN
+            current_price = (ticker.bid + ticker.ask) / 2
+        
+        current_price = round(current_price, 2)
+
+        if current_price <= 0:
+            logging.warning(f"Invalid price ({current_price}) from snapshot for {contract_display_name}. Retrying in 15s...")
+            ib.sleep(15)
             continue
 
         if current_price > highest_price:
@@ -260,7 +342,7 @@ def monitor_position_with_trailing(spy_ticker ,strike, direction, expiry, entry_
                 send_email(f"Potential Issue: Stop Loss Close - {contract_display_name}", error_msg)
             break
 
-        time.sleep(30)
+        ib.sleep(20)
 
 # =========================
 #          Trading Logic
@@ -312,6 +394,8 @@ def trade_spy_options():
         "LOW_VIX_ALLOCATION_MULT": 1.15,
         "HIGH_VIX_TRAILING_STOP": 20.0,
         "LOW_VIX_TRAILING_STOP": 10.0,
+        "MIN_VOLUME": 100,
+        "MIN_OPEN_INTEREST": 500,
     }
   
     direction = None
@@ -381,12 +465,6 @@ def trade_spy_options():
     expiry = available_expiries[1]
     strike = round(price)
 
-    option_price = get_option_price_yahoo(spy_ticker, expiry, strike, direction)
-    if option_price is None or option_price <= 0 or math.isnan(option_price):
-        logging.warning(f"Invalid or zero option price (${option_price}) for {direction} {strike} {expiry}. Skipping trade.")
-        send_email("Trade Error - Option Price", f"Option price for {direction} {strike} {expiry} is invalid (${option_price}). Skipping trade.")
-        return
-
     contract = Option(
         symbol='SPY',
         lastTradeDateOrContractMonth=expiry.replace("-", ""),
@@ -403,7 +481,39 @@ def trade_spy_options():
         send_email("Trade Error - Qualification", f"Failed to qualify contract: {contract}")
         return
     contract = qualified_contracts[0]
-    logging.info(f"Qualified Contract: {contract.localSymbol if hasattr(contract, 'localSymbol') else contract}")
+    logging.info(f"Qualified Contract: {contract.localSymbol}")
+
+    ticker = get_option_snapshot(contract)
+    if ticker is None:
+        logging.warning(f"Could not get market data for {contract.localSymbol}. Skipping trade.")
+        return
+
+    volume = ticker.volume if ticker.volume == ticker.volume else 0 # Handle NaN volume
+    open_interest = ticker.openInterest if ticker.openInterest == ticker.openInterest else 0 # Handle NaN OI
+    min_volume = strategy_config["MIN_VOLUME"]
+    min_open_interest = strategy_config["MIN_OPEN_INTEREST"]
+
+    logging.info(f"Liquidity Check for {contract.localSymbol}: Volume={volume}, Open Interest={open_interest}")
+
+    if volume < min_volume or open_interest < min_open_interest:
+        logging.warning(f"TRADE REJECTED: {contract.localSymbol} failed liquidity check. "
+                        f"Vol ({volume}) < MinVol ({min_volume}) or "
+                        f"OI ({open_interest}) < MinOI ({min_open_interest}).")
+        send_email(f"Trade Rejected - Illiquid", f"Contract {contract.localSymbol} was rejected due to low liquidity.")
+        return
+
+    logging.info("Liquidity check passed.")
+
+    price = ticker.last
+    if price != price: # Check for NaN
+        price = (ticker.bid + ticker.ask) / 2
+    
+    option_price = round(price, 2)
+
+    if option_price <= 0:
+        logging.warning(f"Invalid or zero option price (${option_price}) from IBKR for {contract.localSymbol}. Skipping trade.")
+        send_email("Trade Error - Option Price", f"IBKR option price for {contract.localSymbol} is invalid (${option_price}). Skipping trade.")
+        return
 
 
     balance = get_account_balance()
@@ -446,6 +556,8 @@ def trade_spy_options():
     filled_qty = trade.orderStatus.filled
     logging.info(f"Entry filled: {filled_qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ${entry_price_filled:.2f} each.")
 
+    save_trade_state(contract, entry_price_filled, filled_qty, current_trailing_percent)
+    
     email_subject = f"Trade Executed: {direction} {qty} {contract.localSymbol if hasattr(contract, 'localSymbol') else 'SPY Option'}"
     email_body = (
         f"Strategy Signal: {trade_rationale}\n"
@@ -460,7 +572,7 @@ def trade_spy_options():
     send_email(email_subject, email_body)
 
     # Pass contract to the monitoring function
-    monitor_position_with_trailing(spy_ticker, strike, direction, expiry, entry_price_filled, contract, current_trailing_percent)
+    monitor_position_with_trailing(contract, entry_price_filled, current_trailing_percent)
 
 # =========================
 #         Main Loop
@@ -468,64 +580,54 @@ def trade_spy_options():
 ib = IB()
 try:
     logging.info("Attempting to connect to IBKR...")
-    # Increased clientId to avoid conflicts if other apps are running
     ib.connect('127.0.0.1', 7497, clientId=int(time.time() % 1000) + 100)
     logging.info(f"Connected to IBKR with Client ID: {ib.client.clientId}.")
 
+    # Create a Ticker object for SPY to be reused
+    spy_ticker = yf.Ticker("SPY")
+
     while True:
-        current_time_eastern = datetime.now(pytz.timezone('US/Eastern')).time()
         logging.info(f"\n--- Main Loop Iteration ({datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
-        if is_market_open():
-            logging.info("Market is open. Checking for trading opportunities...")
-            try:
-                # Ensure we have the latest account summary before trading logic
-                # This is important if the balance changes due to other activities
-                
-                # Check for open positions before attempting a new trade
-                # This simple version assumes one trade at a time.
-                # More complex logic would be needed to manage multiple positions
-                # or to avoid trading if a position in SPY options is already open.
-                current_positions = ib.positions()
-                spy_option_position_open = any(
-                    p.contract.symbol == 'SPY' and p.contract.secType == 'OPT' and p.position != 0
-                    for p in (current_positions or [])
-                )
+        
+        # Load the state at the beginning of every loop
+        trade_state = load_trade_state()
 
-                if spy_option_position_open:
-                    # If a position is found, we can then loop to get the details for logging,
-                    # which is cleaner than mixing logic and logging in the check itself.
-                    for pos in current_positions:
-                         if pos.contract.symbol == 'SPY' and pos.contract.secType == 'OPT' and pos.position != 0:
-                            logging.warning(f"Active SPY option position found: {pos.contract.localSymbol if hasattr(pos.contract, 'localSymbol') else pos.contract.symbol} Quantity: {pos.position}. Skipping new trade initiation.")
-                            break
-                
-                if not spy_option_position_open:
-                    trade_spy_options()
-                else:
-                    # If a position is open, you might want to ensure it's being monitored
-                    # The current structure starts monitoring only after a trade.
-                    # For robust continuous monitoring of existing positions on script restart,
-                    # you'd need to identify and resume monitoring.
-                    # For now, we just skip new trades if one is open.
-                    pass
+        if trade_state["is_position_open"]:
+            logging.warning("RECOVERY MODE: Active trade found in state file. Resuming monitoring.")
+            
+            # Extract details from the loaded state
+            contract = trade_state["contract"]
+            entry_price = trade_state["entry_price"]
+            trailing_percent = trade_state["trailing_percent"]
+            
+            # We must qualify the contract again after a restart
+            ib.qualifyContracts(contract)
 
-            except Exception as e:
-                error_message = f"Main loop error during trade evaluation: {e}"
-                import traceback
-                tb_str = traceback.format_exc()
-                logging.error(error_message)
-                logging.info(tb_str)
-                send_email("Bot Runtime Error - Main Loop", f"{error_message}\n\nTraceback:\n{tb_str}")
+            # Directly start monitoring. We will replace this function in the next guide.
+            # Note: The arguments for the old function are still available if needed, but the new one is cleaner.
+            expiry_str = contract.lastTradeDateOrContractMonth
+            expiry_formatted = f"{expiry_str[:4]}-{expiry_str[4:6]}-{expiry_str[6:]}"
+            monitor_position_with_trailing(contract, entry_price, trailing_percent)
+            logging.info("Monitoring finished. Returning to main loop.")
+
+        elif is_market_open():
+            logging.info("Market is open. Checking for new trading opportunities...")
+            # The original logic to check for a new trade only runs if no position is open.
+            # We can simplify the check here, as our state file is the source of truth.
+            # A failsafe check against actual positions is still good practice.
+            current_positions = ib.positions()
+            spy_option_position_open = any(
+                p.contract.symbol == 'SPY' and p.contract.secType == 'OPT' and p.position != 0
+                for p in (current_positions or [])
+            )
+            if not spy_option_position_open:
+                 trade_spy_options()
+            else:
+                 logging.warning("IBKR shows an open SPY position, but state file is clear. Please check manually. Skipping new trades.")
+
         else:
-            logging.info(f"Market closed (Current Eastern Time: {current_time_eastern}). Sleeping...")
-            if dtime(16, 0) <= current_time_eastern < dtime(16, 5):
-                 open_positions = ib.positions()
-                 for pos in open_positions:
-                     if pos.contract.symbol == 'SPY' and pos.contract.secType == 'OPT' and pos.position != 0:
-                         contract_display_name = pos.contract.localSymbol if hasattr(pos.contract, 'localSymbol') else f"{pos.contract.symbol} Option"
-                         eod_warning_msg = f"EOD WARNING: Position in {contract_display_name} (Qty: {pos.position}) is still open after market close."
-                         logging.warning(eod_warning_msg)
-                         send_email(f"EOD Alert: Open Position - {contract_display_name}", eod_warning_msg)
+            logging.info(f"Market closed. Sleeping...")
+            # (Your EOD check logic can remain here)
 
         main_loop_sleep_seconds = 300 # 5 minutes
         logging.info(f"--- End of Loop Iteration. Sleeping for {main_loop_sleep_seconds // 60} minutes. ---")
