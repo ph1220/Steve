@@ -431,7 +431,7 @@ def trade_spy_options():
     # FORCED TRADE LOGIC
   
     direction = "C" # <--- TEMPORARILY ADD THIS LINE TO FORCE A TRADE ATTEMPT
-    trade_rationale = "FORCED TEST"
+    trade_rationale = "FORCED TEST - IF YOU SEE THIS IT IS A GOOD THING"
 
     logging.info(f"Trade Signal: {direction} | Rationale: {trade_rationale}")
 
