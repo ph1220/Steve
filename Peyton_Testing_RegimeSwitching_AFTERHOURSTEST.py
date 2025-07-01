@@ -593,7 +593,7 @@ try:
     # Create a Ticker object for SPY to be reused
     spy_ticker = yf.Ticker("SPY")
 
-while True:
+    while True:
         logging.info(f"\n--- Main Loop Iteration ({datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
         
         # Load the state at the beginning of every loop
