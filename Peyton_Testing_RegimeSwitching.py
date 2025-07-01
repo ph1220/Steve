@@ -583,7 +583,7 @@ try:
     ib.connect('127.0.0.1', 7497, clientId=int(time.time() % 1000) + 100)
     logging.info(f"Connected to IBKR with Client ID: {ib.client.clientId}.")
 
-    ib.reqMarketDataType(3)
+    ib.reqMarketDataType(4)
     
     # Create a Ticker object for SPY to be reused
     spy_ticker = yf.Ticker("SPY")
