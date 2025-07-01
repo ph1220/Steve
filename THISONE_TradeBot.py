@@ -395,7 +395,7 @@ def trade_spy_options():
         "HIGH_VIX_TRAILING_STOP": 20.0,
         "LOW_VIX_TRAILING_STOP": 10.0,
         "MIN_VOLUME": 100,
-        "MIN_OPEN_INTEREST": 500,
+        # "MIN_OPEN_INTEREST": 500,
     }
   
     direction = None
@@ -484,37 +484,28 @@ def trade_spy_options():
     logging.info(f"Qualified Contract: {contract.localSymbol}")
 
     # ==================================================================
-    # Get the full contract details to reliably get openInterest
+    # Get market data snapshot for liquidity check and price
     # ==================================================================
-    details_list = ib.reqContractDetails(contract)
-    if not details_list:
-        logging.warning(f"Could not fetch contract details for {contract.localSymbol}. Skipping trade.")
-        return
-    
-    open_interest = details_list[0].openInterest if details_list[0].openInterest else 0
-
     ticker = get_option_snapshot(contract)
     if ticker is None:
         logging.warning(f"Could not get market data snapshot for {contract.localSymbol}. Skipping trade.")
         return
 
+    # --- Perform the liquidity check using ONLY volume ---
     volume = ticker.volume if ticker.volume == ticker.volume else 0 # Handle NaN volume
-    
-    # --- Perform the liquidity check with data from both sources ---
     min_volume = strategy_config["MIN_VOLUME"]
-    min_open_interest = strategy_config["MIN_OPEN_INTEREST"]
 
-    logging.info(f"Liquidity Check for {contract.localSymbol}: Volume={volume}, Open Interest={open_interest}")
+    logging.info(f"Liquidity Check for {contract.localSymbol}: Volume={volume}")
 
-    if volume < min_volume or open_interest < min_open_interest:
+    if volume < min_volume:
         logging.warning(f"TRADE REJECTED: {contract.localSymbol} failed liquidity check. "
-                        f"Vol ({volume}) < MinVol ({min_volume}) or "
-                        f"OI ({open_interest}) < MinOI ({min_open_interest}).")
-        send_email(f"Trade Rejected - Illiquid", f"Contract {contract.localSymbol} was rejected due to low liquidity.")
+                        f"Volume ({volume}) is less than minimum required ({min_volume}).")
+        send_email(f"Trade Rejected - Illiquid", f"Contract {contract.localSymbol} was rejected due to low volume.")
         return
 
     logging.info("Liquidity check passed.")
 
+    # Extract the price from the SAME snapshot
     price = ticker.last
     if price != price: # Check for NaN
         price = (ticker.bid + ticker.ask) / 2
