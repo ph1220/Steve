@@ -483,13 +483,24 @@ def trade_spy_options():
     contract = qualified_contracts[0]
     logging.info(f"Qualified Contract: {contract.localSymbol}")
 
+    # ==================================================================
+    # Get the full contract details to reliably get openInterest
+    # ==================================================================
+    details_list = ib.reqContractDetails(contract)
+    if not details_list:
+        logging.warning(f"Could not fetch contract details for {contract.localSymbol}. Skipping trade.")
+        return
+    
+    open_interest = details_list[0].openInterest if details_list[0].openInterest else 0
+
     ticker = get_option_snapshot(contract)
     if ticker is None:
-        logging.warning(f"Could not get market data for {contract.localSymbol}. Skipping trade.")
+        logging.warning(f"Could not get market data snapshot for {contract.localSymbol}. Skipping trade.")
         return
 
     volume = ticker.volume if ticker.volume == ticker.volume else 0 # Handle NaN volume
-    open_interest = ticker.openInterest if ticker.openInterest == ticker.openInterest else 0 # Handle NaN OI
+    
+    # --- Perform the liquidity check with data from both sources ---
     min_volume = strategy_config["MIN_VOLUME"]
     min_open_interest = strategy_config["MIN_OPEN_INTEREST"]
 
