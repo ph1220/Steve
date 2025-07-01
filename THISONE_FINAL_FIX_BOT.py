@@ -64,10 +64,22 @@ STATE_FILE = "trade_state.json"
 
 def save_trade_state(contract, entry_price, quantity, trailing_percent):
     """Saves the active trade's state to a file."""
+    # Manually create a dictionary with only the essential contract fields
+    # needed to recreate it later
+    contract_state = {
+        'conId': contract.conId,
+        'symbol': contract.symbol,
+        'lastTradeDateOrContractMonth': contract.lastTradeDateOrContractMonth,
+        'strike': contract.strike,
+        'right': contract.right,
+        'exchange': contract.exchange,
+        'currency': contract.currency,
+        'localSymbol': contract.localSymbol
+    }
+    
     state = {
         "is_position_open": True,
-        # util.contract_to_dict converts the IB contract object into a savable format
-        "contract": util.contract_to_dict(contract),
+        "contract": contract_state,  # Use our new dictionary
         "entry_price": entry_price,
         "quantity": quantity,
         "trailing_percent": trailing_percent
