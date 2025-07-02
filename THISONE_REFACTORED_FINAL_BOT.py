@@ -62,10 +62,35 @@ def send_email(subject, body):
 
 STATE_FILE = "trade_state.json"
 
-def save_trade_state(contract, entry_price, quantity, trailing_percent):
-    """Saves the active trade's state to a file."""
-    # Manually create a dictionary with only the essential contract fields
-    # needed to recreate it later
+# --- ADJUST THESE VALUES AS NEEDED ---
+strategy_config = {
+    "BASE_ALLOCATION_PERCENT": 0.03, # Changed from 0.05 to 0.03
+    "BASE_TRAILING_PERCENT": 11.0, # Changed from 15.0 to 11.0
+    "VIX_HIGH_SIGNAL_THRESHOLD": 25.0, # Changed from 24 to 25
+    "VIX_HIGH_RISK_THRESHOLD": 24.0,
+    "VIX_LOW_RISK_THRESHOLD": 17.0,
+    "RSI_HIGH_VIX_OVERSOLD": 26.0, # Changed from 25 to 26
+    "RSI_HIGH_VIX_OVERBOUGHT": 74.0, # Changed from 75 to 74
+    "RSI_STD_OVERSOLD": 28.0, # Changed from 30 to 28
+    "RSI_STD_OVERBOUGHT": 72.0, # Changed from 70 to 72
+    "HIGH_VIX_ALLOCATION_MULT": 0.35, # Changed from 0.5 to 0.35
+    "LOW_VIX_ALLOCATION_MULT": 1.25, # Changed from 1.15 to 1.25
+    "HIGH_VIX_TRAILING_STOP": 20.0,
+    "LOW_VIX_TRAILING_STOP": 10.0,
+    "MIN_VOLUME": 100,
+    # "MIN_OPEN_INTEREST": 500,
+    # --- NORMAL/LOW VIX - TREND FOLLOWING ---
+    "TREND_PROFIT_TARGET_1": 25.0,  # Move to breakeven at 25%
+    "TREND_PROFIT_TARGET_2": 50.0,  # Tighten stop at 50%
+    "TREND_TIGHTENED_STOP": 8.0,    # The tightened stop for trends
+    # --- HIGH VIX - MEAN REVERSION ---
+    "REVERSION_PROFIT_TARGET_1": 15.0,  # Move to breakeven at only 15%
+    "REVERSION_PROFIT_TARGET_2": 30.0,  # Tighten stop at only 30%
+    "REVERSION_TIGHTENED_STOP": 5.0     # An even tighter stop for choppy markets
+}
+
+def save_trade_state(contract, entry_price, quantity, highest_price, trailing_percent, active_regime, breakeven_activated=False, profit_lock_activated=False):
+    """Saves the active trade's state, including the active trading regime."""
     contract_state = {
         'conId': contract.conId,
         'symbol': contract.symbol,
@@ -79,25 +104,33 @@ def save_trade_state(contract, entry_price, quantity, trailing_percent):
     
     state = {
         "is_position_open": True,
-        "contract": contract_state,  # Use our new dictionary
+        "contract": contract_state,
         "entry_price": entry_price,
         "quantity": quantity,
-        "trailing_percent": trailing_percent
+        "highest_price": highest_price,
+        "trailing_percent": trailing_percent,
+        "active_regime": active_regime,
+        "breakeven_activated": breakeven_activated,
+        "profit_lock_activated": profit_lock_activated
     }
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
     logging.info(f"Trade state saved for {contract.localSymbol}.")
 
 def load_trade_state():
-    """Loads the trade state from a file."""
+    """Loads the trade state, including the active trading regime."""
     if not os.path.exists(STATE_FILE):
-        return {"is_position_open": False} # Default state if no file exists
+        return {"is_position_open": False}
     try:
         with open(STATE_FILE, 'r') as f:
             state = json.load(f)
-            # Convert the dictionary back into an ib_insync Contract object
             if state.get("is_position_open"):
                 state['contract'] = Contract(**state['contract'])
+                # Load the flags, defaulting to False if they don't exist
+                state['breakeven_activated'] = state.get('breakeven_activated', False)
+                state['profit_lock_activated'] = state.get('profit_lock_activated', False)
+                # Load the regime, defaulting to "TREND" for backward compatibility
+                state['active_regime'] = state.get('active_regime', 'TREND')
             return state
     except (json.JSONDecodeError, IOError) as e:
         logging.error(f"Error loading state file: {e}. Resetting state.")
@@ -270,7 +303,6 @@ def close_position(contract):
                 msg = f"Position closed: {trade.orderStatus.avgFillPrice} x {trade.orderStatus.filled} for {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}. Status: {trade.orderStatus.status}"
                 logging.info(msg)
                 send_email(f"Position Closed - {contract.localSymbol if hasattr(contract, 'localSymbol') else 'contract'}", msg)
-                clear_trade_state()
                 position_closed = True
                 break
             else:
@@ -290,6 +322,9 @@ def close_position(contract):
         # This covers the case where the loop was never entered because the position didn't exist to begin with.
         logging.warning(f"No matching open position was found to close.")
 
+    if position_closed:
+        clear_trade_state()
+
     return position_closed
 
 # --- Active Trade Helper Function ---
@@ -301,53 +336,70 @@ def wait_for_trade_completion(ib_instance, trade, max_wait_sec=60):
     return trade
 
 # =========================
-#   Trailing Stop Monitor (IBKR Paper-Trading Powered)
+#   Intelligent Trailing Stop Monitor
 # =========================
-def monitor_position_with_trailing(contract, entry_price, dynamic_trailing_percent):
-    highest_price = entry_price
+def monitor_position_with_trailing(contract, entry_price, quantity, dynamic_trailing_percent, strategy_config, active_profit_targets, active_regime):
     contract_display_name = contract.localSymbol
+    
+    trade_state = load_trade_state()
+    highest_price = trade_state.get('highest_price', entry_price)
+    breakeven_activated = trade_state.get('breakeven_activated', False)
+    profit_lock_activated = trade_state.get('profit_lock_activated', False)
+    current_trailing_percent = trade_state.get('trailing_percent', dynamic_trailing_percent)
 
-    logging.info(f"Monitoring {contract_display_name} with entry {entry_price:.2f}, initial trailing stop at {dynamic_trailing_percent}%.")
+    logging.info(f"Monitoring {contract_display_name} in {active_regime} mode with entry {entry_price:.2f}, initial stop at {current_trailing_percent}%.")
+    logging.info(f"Using profit targets: Breakeven at {active_profit_targets['target_1']}%, Tighten Stop at {active_profit_targets['target_2']}%")
+    if breakeven_activated: logging.warning("RECOVERY: Breakeven stop is already active.")
+    if profit_lock_activated: logging.warning("RECOVERY: Profit lock-in stop is already active.")
 
     while True:
-        if not is_market_open():
-            logging.info(f"Market closed while monitoring {contract_display_name}. Attempting to close position.")
-            if not close_position(contract):
-                error_msg = f"ALERT: Attempt to close {contract_display_name} at EOD did not confirm 'Filled'."
-                logging.error(error_msg)
-                send_email(f"Potential Issue: EOD Close - {contract_display_name}", error_msg)
-            break
+        if not is_market_open(): break
+
+        if not entry_price or entry_price <= 0:
+            logging.error(f"CRITICAL MONITORING ERROR: Invalid entry price ({entry_price}) for {contract_display_name}. Cannot calculate gain. Aborting monitor.")
+            send_email(f"Bot Critical Error - Invalid Entry Price", f"Monitoring for {contract_display_name} has been aborted due to an invalid entry price of {entry_price}.")
+            break # Exit the monitoring loop safely
 
         ticker = get_option_snapshot(contract)
-
-        if ticker is None:
-            logging.warning(f"Could not get a valid snapshot for {contract_display_name}. Retrying in 15s...")
-            ib.sleep(15) 
-            continue
+        if ticker is None: continue
         
-        # Extract the price from the ticker
         current_price = ticker.last
-        if current_price != current_price: # Check for NaN
-            current_price = (ticker.bid + ticker.ask) / 2
-        
+        if current_price != current_price: current_price = (ticker.bid + ticker.ask) / 2
         current_price = round(current_price, 2)
+        if current_price <= 0: continue
 
-        if current_price <= 0:
-            logging.warning(f"Invalid price ({current_price}) from snapshot for {contract_display_name}. Retrying in 15s...")
-            ib.sleep(15)
-            continue
+        state_changed = False
 
         if current_price > highest_price:
             highest_price = current_price
             logging.info(f"New High for {contract_display_name}: {highest_price:.2f}")
+            state_changed = True
 
-        stop_price = highest_price * (1 - dynamic_trailing_percent / 100)
-        stop_price = round(stop_price, 2)
+        current_gain_percent = ((current_price - entry_price) / entry_price) * 100
 
-        logging.info(f"{contract_display_name} - Current: {current_price:.2f} | High: {highest_price:.2f} | Stop: {stop_price:.2f} (Trail: {dynamic_trailing_percent}%)")
+        if not breakeven_activated and current_gain_percent >= active_profit_targets["target_1"]:
+            breakeven_activated = True
+            logging.warning(f"PROFIT TARGET 1 HIT (+{current_gain_percent:.1f}%). Stop loss is now at breakeven (${entry_price:.2f}).")
+            state_changed = True
 
-        if current_price <= stop_price:
-            logging.warning(f"Trailing stop hit for {contract_display_name} at {current_price:.2f} (Stop: {stop_price:.2f})! Attempting to close...")
+        if not profit_lock_activated and current_gain_percent >= active_profit_targets["target_2"]:
+            profit_lock_activated = True
+            breakeven_activated = True # Hitting target 2 automatically implies target 1 is also hit
+            current_trailing_percent = active_profit_targets["tightened_stop"]
+            logging.warning(f"PROFIT TARGET 2 HIT (+{current_gain_percent:.1f}%). Trailing stop tightened to {current_trailing_percent}%.")
+            state_changed = True
+
+        if state_changed:
+            save_trade_state(contract, entry_price, quantity, highest_price, current_trailing_percent, active_regime, breakeven_activated, profit_lock_activated)
+
+        trailing_stop_price = highest_price * (1 - current_trailing_percent / 100)
+        final_stop_price = max(trailing_stop_price, entry_price) if breakeven_activated else trailing_stop_price
+        final_stop_price = round(final_stop_price, 2)
+
+        logging.info(f"{contract_display_name} - Gain: {current_gain_percent:+.1f}% | Current: {current_price:.2f} | High: {highest_price:.2f} | Stop: {final_stop_price:.2f} (Trail: {current_trailing_percent}%)")
+
+        if current_price <= final_stop_price:
+            logging.warning(f"Stop hit for {contract_display_name} at {current_price:.2f} (Stop: {final_stop_price:.2f})! Attempting to close...")
             if not close_position(contract):
                 error_msg = f"ALERT: Attempt to close {contract_display_name} on stop-loss did not confirm 'Filled'."
                 logging.error(error_msg)
@@ -359,14 +411,11 @@ def monitor_position_with_trailing(contract, entry_price, dynamic_trailing_perce
 # =========================
 #          Trading Logic
 # =========================
-def trade_spy_options():
-    # --- Essential Pre-checks ---
+def trade_spy_options(spy_ticker):
     if not is_market_open():
         logging.info("Market is closed. Skipping trade evaluation.")
         return
 
-    spy_ticker = yf.Ticker("SPY")
-    
     price, _ = get_spy_price(spy_ticker)
     if price is None:
         send_email("Bot Error - SPY Price", "Failed to fetch SPY price. Trade aborted.")
@@ -380,213 +429,115 @@ def trade_spy_options():
     current_vix = None
     try:
         vix_ticker = yf.Ticker("^VIX")
-        vix_data = vix_ticker.history(period="1d") # gets the latest closing VIX
+        vix_data = vix_ticker.history(period="1d")
         if not vix_data.empty:
             current_vix = vix_data['Close'].iloc[-1]
             logging.info(f"Current VIX: {current_vix:.2f}")
-        else:
-            logging.warning("Could not fetch VIX data. Defaulting to normal VIX logic for signals and risk.")
-            send_email("Bot Warning - VIX Fetch", "Could not fetch VIX data. Using default parameters.")
     except Exception as e:
-        logging.error(f"Error fetching VIX: {e}. Defaulting to normal VIX logic for signals and risk.")
-        send_email("Bot Error - VIX Fetch", f"Error fetching VIX: {str(e)}. Using default parameters.")
+        logging.error(f"Error fetching VIX: {e}.")
 
-# --- CHANGE THESE VALUES HERE ONLY ---
-    strategy_config = {
-        "BASE_ALLOCATION_PERCENT": 0.05,
-        "BASE_TRAILING_PERCENT": 15.0,
-        "VIX_HIGH_SIGNAL_THRESHOLD": 24.0,
-        "VIX_HIGH_RISK_THRESHOLD": 24.0,
-        "VIX_LOW_RISK_THRESHOLD": 17.0,
-        "RSI_HIGH_VIX_OVERSOLD": 25.0,
-        "RSI_HIGH_VIX_OVERBOUGHT": 75.0,
-        "RSI_STD_OVERSOLD": 30.0,
-        "RSI_STD_OVERBOUGHT": 70.0,
-        "HIGH_VIX_ALLOCATION_MULT": 0.5,
-        "LOW_VIX_ALLOCATION_MULT": 1.15,
-        "HIGH_VIX_TRAILING_STOP": 20.0,
-        "LOW_VIX_TRAILING_STOP": 10.0,
-        "MIN_VOLUME": 100,
-        # "MIN_OPEN_INTEREST": 500,
-    }
-  
+    # --- Determine Trading Regime and Parameters ---
+    is_high_vix = current_vix is not None and current_vix > strategy_config["VIX_HIGH_SIGNAL_THRESHOLD"]
+    regime_name = "REVERSION" if is_high_vix else "TREND"
+
     direction = None
     trade_rationale = ""
-
-    if current_vix is not None and current_vix > strategy_config["VIX_HIGH_SIGNAL_THRESHOLD"]:
-        logging.info(f"High VIX ({current_vix:.2f}): Applying High VIX (Mean Reversion) signal logic.")
-        if rsi < strategy_config["RSI_HIGH_VIX_OVERSOLD"]:
-            direction = "C" # Buy Call on extreme oversold
-            trade_rationale = f"High VIX Mean Reversion: RSI {rsi:.2f} < {strategy_config['RSI_HIGH_VIX_OVERSOLD']}"
-        elif rsi > strategy_config["RSI_HIGH_VIX_OVERBOUGHT"]:
-            direction = "P" # Buy Put on extreme overbought
-            trade_rationale = f"High VIX Mean Reversion: RSI {rsi:.2f} > {strategy_config['RSI_HIGH_VIX_OVERBOUGHT']}"
-    else: # Normal or Low VIX, or VIX not available will use the original trend-following logic
-        vix_status_for_signal = "Normal/Low VIX"
-        if current_vix is None:
-            vix_status_for_signal = "VIX N/A"
-        elif current_vix < strategy_config["VIX_HIGH_SIGNAL_THRESHOLD"] : # Covers low and normal
-             vix_status_for_signal = f"VIX {current_vix:.2f}"
-
-        logging.info(f"{vix_status_for_signal}: Applying Standard Trend signal logic.")
-        if price > sma and rsi < strategy_config["RSI_STD_OVERBOUGHT"]:
-            direction = "C"
-            trade_rationale = f"Standard Trend: Price > SMA, RSI {rsi:.2f} < {strategy_config['RSI_STD_OVERBOUGHT']}"
-        elif price < sma and rsi > strategy_config["RSI_STD_OVERSOLD"]:
-            direction = "P"
-            trade_rationale = f"Standard Trend: Price < SMA, RSI {rsi:.2f} > {strategy_config['RSI_STD_OVERSOLD']}"
+    if is_high_vix:
+        logging.info(f"High VIX ({current_vix:.2f}): Applying {regime_name} signal logic.")
+        if rsi < strategy_config["RSI_HIGH_VIX_OVERSOLD"]: direction, trade_rationale = "C", f"High VIX Mean Reversion: RSI {rsi:.2f} < {strategy_config['RSI_HIGH_VIX_OVERSOLD']}"
+        elif rsi > strategy_config["RSI_HIGH_VIX_OVERBOUGHT"]: direction, trade_rationale = "P", f"High VIX Mean Reversion: RSI {rsi:.2f} > {strategy_config['RSI_HIGH_VIX_OVERBOUGHT']}"
+    else:
+        vix_status = f"VIX {current_vix:.2f}" if current_vix is not None else "VIX N/A"
+        logging.info(f"{vix_status}: Applying {regime_name} signal logic.")
+        if price > sma and rsi < strategy_config["RSI_STD_OVERBOUGHT"]: direction, trade_rationale = "C", f"Standard Trend: Price > SMA, RSI {rsi:.2f} < {strategy_config['RSI_STD_OVERBOUGHT']}"
+        elif price < sma and rsi > strategy_config["RSI_STD_OVERSOLD"]: direction, trade_rationale = "P", f"Standard Trend: Price < SMA, RSI {rsi:.2f} > {strategy_config['RSI_STD_OVERSOLD']}"
 
     if direction is None:
-        logging.info(f"No trade signal based on current logic (VIX: {current_vix if current_vix else 'N/A'}, RSI: {rsi:.2f}, Price/SMA: {price:.2f}/{sma:.2f}).")
+        logging.info("No trade signal based on current logic.")
         return
-
     logging.info(f"Trade Signal: {direction} | Rationale: {trade_rationale}")
 
-    # --- Dynamic Risk Adjustment Based On VIX ---
-    base_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"]
-    base_trailing_percent = strategy_config["BASE_TRAILING_PERCENT"]
-    current_allocation_percentage = base_allocation_percentage
-    current_trailing_percent = base_trailing_percent
-  
-    vix_risk_profile = "Default"
-    if current_vix is not None:
-        if current_vix > strategy_config["VIX_HIGH_RISK_THRESHOLD"]:
-            current_allocation_percentage = base_allocation_percentage * strategy_config["HIGH_VIX_ALLOCATION_MULT"]
-            current_trailing_percent = strategy_config["HIGH_VIX_TRAILING_STOP"]
-            vix_risk_profile = f"High VIX ({current_vix:.2f})"
-            logging.info(f"{vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
-        elif current_vix < strategy_config["VIX_LOW_RISK_THRESHOLD"]:
-            current_allocation_percentage = base_allocation_percentage * strategy_config["LOW_VIX_ALLOCATION_MULT"]
-            current_trailing_percent = strategy_config["LOW_VIX_TRAILING_STOP"]
-            vix_risk_profile = f"Low VIX ({current_vix:.2f})"
-            logging.info(f"{vix_risk_profile}: Adjusting risk - Allocation to {current_allocation_percentage*100:.1f}%, Trailing to {current_trailing_percent}%.")
-        else: # Normal VIX range
-            vix_risk_profile = f"Normal VIX ({current_vix:.2f})"
-            logging.info(f"{vix_risk_profile}: Using default risk - Allocation {current_allocation_percentage*100:.1f}%, Trailing {current_trailing_percent}%.")
-    else:
-        logging.warning("VIX data not available for risk adjustment, using default risk parameters.")
-        vix_risk_profile = "VIX N/A (Default Risk)"
+    # --- Set Dynamic Parameters based on Regime ---
+    if is_high_vix:
+        current_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"] * strategy_config["HIGH_VIX_ALLOCATION_MULT"]
+        current_trailing_percent = strategy_config["HIGH_VIX_TRAILING_STOP"]
+        active_profit_targets = {"target_1": strategy_config["REVERSION_PROFIT_TARGET_1"], "target_2": strategy_config["REVERSION_PROFIT_TARGET_2"], "tightened_stop": strategy_config["REVERSION_TIGHTENED_STOP"]}
+    else: # Normal or Low VIX
+        current_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"] * strategy_config["LOW_VIX_ALLOCATION_MULT"]
+        current_trailing_percent = strategy_config["LOW_VIX_TRAILING_STOP"]
+        active_profit_targets = {"target_1": strategy_config["TREND_PROFIT_TARGET_1"], "target_2": strategy_config["TREND_PROFIT_TARGET_2"], "tightened_stop": strategy_config["TREND_TIGHTENED_STOP"]}
 
-
-    # --- Option Selection and Trade Execution ---
+    # --- Option Selection and Execution ---
     available_expiries = spy_ticker.options
     if len(available_expiries) < 2:
-        logging.warning("Not enough expiry dates available for SPY options. Skipping trade.")
-        send_email("Trade Error - Expiry", "Not enough SPY option expiry dates available.")
+        logging.error(f"Not enough expiration dates found for SPY. Found: {len(available_expiries)}. Need at least 2. Aborting trade.")
         return
+    # We select the second expiry (weekly) to avoid the nearest-term options
     expiry = available_expiries[1]
-    strike = round(price)
 
-    contract = Option(
-        symbol='SPY',
-        lastTradeDateOrContractMonth=expiry.replace("-", ""),
-        strike=strike,
-        right=direction,
-        exchange='SMART',
-        currency='USD'
-    )
-    
-    logging.info(f"Qualifying contract: {contract.symbol} {contract.lastTradeDateOrContractMonth} {contract.strike} {contract.right}")
-    qualified_contracts = ib.qualifyContracts(contract)
-    if not qualified_contracts:
-        logging.warning(f"Contract could not be qualified: {contract}. Skipping trade.")
-        send_email("Trade Error - Qualification", f"Failed to qualify contract: {contract}")
+    # Fetch the entire option chain for the chosen expiry
+    opt_chain = spy_ticker.option_chain(expiry)
+    chain_df = opt_chain.calls if direction == 'C' else opt_chain.puts
+
+    # Ensure the chain is not empty
+    if chain_df.empty:
+        logging.warning(f"No {direction} options found for expiry {expiry}. Aborting trade.")
         return
+
+    # Find the strike in the chain that is mathematically closest to the current SPY price
+    closest_strike_index = (chain_df['strike'] - price).abs().idxmin()
+    strike = chain_df.loc[closest_strike_index]['strike']
+    logging.info(f"Target price is {price:.2f}. Closest available strike is {strike}.")
+
+    contract = Option('SPY', expiry.replace("-", ""), strike, direction, 'SMART', currency='USD')
+    
+    qualified_contracts = ib.qualifyContracts(contract)
+    if not qualified_contracts: return
     contract = qualified_contracts[0]
     logging.info(f"Qualified Contract: {contract.localSymbol}")
 
-    # ==================================================================
-    # Get market data snapshot for liquidity check and price
-    # ==================================================================
     ticker = get_option_snapshot(contract)
-    if ticker is None:
-        logging.warning(f"Could not get market data snapshot for {contract.localSymbol}. Skipping trade.")
+    if ticker is None: return
+
+    volume = ticker.volume if ticker.volume == ticker.volume else 0
+    if volume < strategy_config["MIN_VOLUME"]:
+        logging.warning(f"TRADE REJECTED: {contract.localSymbol} failed liquidity check. Volume ({volume}) < MinVol ({strategy_config['MIN_VOLUME']}).")
         return
+    logging.info(f"Liquidity check passed. Volume={volume}")
 
-    # --- Perform the liquidity check using ONLY volume ---
-    volume = ticker.volume if ticker.volume == ticker.volume else 0 # Handle NaN volume
-    min_volume = strategy_config["MIN_VOLUME"]
-
-    logging.info(f"Liquidity Check for {contract.localSymbol}: Volume={volume}")
-
-    if volume < min_volume:
-        logging.warning(f"TRADE REJECTED: {contract.localSymbol} failed liquidity check. "
-                        f"Volume ({volume}) is less than minimum required ({min_volume}).")
-        send_email(f"Trade Rejected - Illiquid", f"Contract {contract.localSymbol} was rejected due to low volume.")
-        return
-
-    logging.info("Liquidity check passed.")
-
-    # Extract the price from the SAME snapshot
-    price = ticker.last
-    if price != price: # Check for NaN
-        price = (ticker.bid + ticker.ask) / 2
-    
+    price = ticker.last if ticker.last == ticker.last else (ticker.bid + ticker.ask) / 2
     option_price = round(price, 2)
-
-    if option_price <= 0:
-        logging.warning(f"Invalid or zero option price (${option_price}) from IBKR for {contract.localSymbol}. Skipping trade.")
-        send_email("Trade Error - Option Price", f"IBKR option price for {contract.localSymbol} is invalid (${option_price}). Skipping trade.")
-        return
-
+    if option_price <= 0: return
 
     balance = get_account_balance()
-    if balance <= 0:
-        logging.warning("Account balance is zero or could not be fetched. Skipping trade.")
-        send_email("Trade Error - Balance", "Account balance is zero or could not be fetched.")
-        return
-
+    if balance <= 0: return
+    
     allocation_amount = balance * current_allocation_percentage
-    logging.info(f"Calculated allocation amount: ${allocation_amount:.2f} ({current_allocation_percentage*100:.1f}% of balance ${balance:.2f})")
-
-    cost_per_contract = option_price * 100 # Options are typically for 100 shares
-    if cost_per_contract <= 0 :
-        logging.warning(f"Cost per contract is zero or negative (${cost_per_contract:.2f}). Skipping trade.")
-        send_email("Trade Error - Contract Cost", f"Cost per contract is ${cost_per_contract:.2f}. Skipping trade.")
-        return
-
+    cost_per_contract = option_price * 100
+    if cost_per_contract <= 0: return
     qty = math.floor(allocation_amount / cost_per_contract)
-
     if qty < 1:
-        logging.warning(f"Not enough balance for {current_allocation_percentage*100:.1f}% allocation. Need ${cost_per_contract:.2f} for 1 contract (Option Price: ${option_price:.2f}), have ${allocation_amount:.2f} allocated for trade. Balance: ${balance:.2f}")
-        send_email("Trade Info - Insufficient Allocation", f"Insufficient funds for 1 contract at current allocation. Need ${cost_per_contract:.2f}, allocated ${allocation_amount:.2f}.")
+        logging.warning(f"Not enough balance for 1 contract. Need ${cost_per_contract:.2f}, allocated ${allocation_amount:.2f}.")
         return
-
-    logging.info(f"Attempting to buy {qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ~${option_price:.2f} each. (Risk Profile: {vix_risk_profile})")
 
     order = MarketOrder('BUY', qty)
     trade = ib.placeOrder(contract, order)
-    logging.info(f"Buy order placed for {qty} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'}.")
-
     trade = wait_for_trade_completion(ib, trade)
-
     if trade.orderStatus.status != 'Filled':
-        msg = f"Buy order for {qty} of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} failed or not filled. Status: {trade.orderStatus.status}, Reason: {trade.orderStatus.whyHeld}"
-        logging.error(msg)
-        send_email(f"Trade Error - Buy Order {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'}", msg)
+        logging.error(f"Buy order for {qty} of {contract.localSymbol} failed. Status: {trade.orderStatus.status}")
         return
 
     entry_price_filled = trade.orderStatus.avgFillPrice
     filled_qty = trade.orderStatus.filled
-    logging.info(f"Entry filled: {filled_qty} contract(s) of {contract.localSymbol if hasattr(contract, 'localSymbol') else 'option'} at ${entry_price_filled:.2f} each.")
+    logging.info(f"Entry filled: {filled_qty} contract(s) of {contract.localSymbol} at ${entry_price_filled:.2f} each.")
 
-    save_trade_state(contract, entry_price_filled, filled_qty, current_trailing_percent)
+    save_trade_state(contract, entry_price_filled, filled_qty, entry_price_filled, current_trailing_percent, regime_name)
     
-    email_subject = f"Trade Executed: {direction} {qty} {contract.localSymbol if hasattr(contract, 'localSymbol') else 'SPY Option'}"
-    email_body = (
-        f"Strategy Signal: {trade_rationale}\n"
-        f"VIX Context: {vix_risk_profile}\n"
-        f"Action: BUY {direction} Option\n"
-        f"Contract: {contract.localSymbol if hasattr(contract, 'localSymbol') else contract}\n"
-        f"Quantity: {filled_qty}\n"
-        f"Entry Price: ${entry_price_filled:.2f}\n"
-        f"Allocation: {current_allocation_percentage*100:.1f}%\n"
-        f"Trailing Stop: {current_trailing_percent}%"
-    )
+    email_subject = f"Trade Executed: {direction} {qty} {contract.localSymbol}"
+    email_body = f"Strategy Signal: {trade_rationale}\n" # ... (rest of email body)
     send_email(email_subject, email_body)
 
-    # Pass contract to the monitoring function
-    monitor_position_with_trailing(contract, entry_price_filled, current_trailing_percent)
+    monitor_position_with_trailing(contract, entry_price_filled, filled_qty, current_trailing_percent, strategy_config, active_profit_targets, regime_name)
 
 # =========================
 #         Main Loop
@@ -596,61 +547,73 @@ try:
     logging.info("Attempting to connect to IBKR...")
     ib.connect('127.0.0.1', 7497, clientId=int(time.time() % 1000) + 100)
     logging.info(f"Connected to IBKR with Client ID: {ib.client.clientId}.")
-
     ib.reqMarketDataType(3)
     
-    # Create a Ticker object for SPY to be reused
-    spy_ticker = yf.Ticker("SPY")
+    
 
     while True:
         logging.info(f"\n--- Main Loop Iteration ({datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
-        
-        # Load the state at the beginning of every loop
+        spy_ticker = yf.Ticker("SPY")
         trade_state = load_trade_state()
 
-        if trade_state["is_position_open"]:
+        if trade_state.get("is_position_open"):
             logging.warning("RECOVERY MODE: Active trade found in state file. Resuming monitoring.")
             
-            # Extract details from the loaded state
             contract = trade_state["contract"]
             entry_price = trade_state["entry_price"]
             trailing_percent = trade_state["trailing_percent"]
+            active_regime = trade_state.get("active_regime", "TREND")
             
-            # We must qualify the contract again after a restart
-            ib.qualifyContracts(contract)
+            if active_regime == "REVERSION":
+                active_profit_targets = {"target_1": strategy_config["REVERSION_PROFIT_TARGET_1"], "target_2": strategy_config["REVERSION_PROFIT_TARGET_2"], "tightened_stop": strategy_config["REVERSION_TIGHTENED_STOP"]}
+            else:
+                active_profit_targets = {"target_1": strategy_config["TREND_PROFIT_TARGET_1"], "target_2": strategy_config["TREND_PROFIT_TARGET_2"], "tightened_stop": strategy_config["TREND_TIGHTENED_STOP"]}
+            
+            qualified_contracts = ib.qualifyContracts(contract)
+            if not qualified_contracts:
+                logging.error(f"RECOVERY FAILED: Contract {contract.localSymbol} from state file is expired or invalid. Clearing state.")
+                send_email("Bot Recovery Failure", f"The contract {contract.localSymbol} could not be qualified, likely because it has expired. The position is assumed closed or worthless. The state file has been cleared.")
+                clear_trade_state()
+                continue # Skip to the next main loop iteration
 
-            # Directly start monitoring. We will replace this function in the next guide.
-            # Note: The arguments for the old function are still available if needed, but the new one is cleaner.
-            expiry_str = contract.lastTradeDateOrContractMonth
-            expiry_formatted = f"{expiry_str[:4]}-{expiry_str[4:6]}-{expiry_str[6:]}"
-            monitor_position_with_trailing(contract, entry_price, trailing_percent)
+            # If successful, use the qualified contract
+            contract = qualified_contracts[0]
+            quantity = trade_state["quantity"]
+            monitor_position_with_trailing(contract, entry_price, quantity, trailing_percent, strategy_config, active_profit_targets, active_regime)
             logging.info("Monitoring finished. Returning to main loop.")
 
         elif is_market_open():
             logging.info("Market is open. Checking for new trading opportunities...")
-            # The original logic to check for a new trade only runs if no position is open.
-            # We can simplify the check here, as our state file is the source of truth.
-            # A failsafe check against actual positions is still good practice.
+    
+            # Check for any existing SPY option positions in the account
             current_positions = ib.positions()
-            spy_option_position_open = any(
-                p.contract.symbol == 'SPY' and p.contract.secType == 'OPT' and p.position != 0
-                for p in (current_positions or [])
-            )
-            if not spy_option_position_open:
-                 trade_spy_options()
+            spy_option_positions = [p for p in (current_positions or []) if p.contract.symbol == 'SPY' and p.contract.secType == 'OPT' and p.position != 0]
+
+            if not spy_option_positions:
+                # No position exists, clear to look for a new trade
+                trade_spy_options(spy_ticker)
             else:
-                 logging.warning("IBKR shows an open SPY position, but state file is clear. Please check manually. Skipping new trades.")
+                # A position exists on IBKR, but our state file is clear. This is a mismatch.
+                # SAFEST ACTION: Close the unknown position to prevent unexpected behavior.
+                ghost_position = spy_option_positions[0] # Take the first one found
+                contract_display = ghost_position.contract.localSymbol
+        
+                error_msg = f"STATE MISMATCH: An unknown SPY Option position for {contract_display} (Qty: {ghost_position.position}) was found in IBKR without a state file. Attempting to close it for safety."
+                logging.error(error_msg)
+                send_email(f"Bot Safety Alert: Closing Unknown Position", error_msg)
+        
+                # Attempt to close the position
+                close_position(ghost_position.contract)
 
         else:
-            logging.info(f"Market closed. Sleeping...")
-            # (Your EOD check logic can remain here)
+            logging.info("Market closed. Sleeping...")
 
-        main_loop_sleep_seconds = 300 # 5 minutes
+        main_loop_sleep_seconds = 300
         logging.info(f"--- End of Loop Iteration. Sleeping for {main_loop_sleep_seconds // 60} minutes. ---")
         time.sleep(main_loop_sleep_seconds)
 
 except ConnectionRefusedError:
-    logging.error(f"IBKR Connection Refused. Ensure TWS/Gateway is running, API connections are enabled, and correct port/IP.")
+    logging.error("IBKR Connection Refused. Ensure TWS/Gateway is running and API connections are enabled.")
     send_email("Bot Critical Error - Connection", "IBKR Connection Refused.")
 except Exception as e:
     import traceback
