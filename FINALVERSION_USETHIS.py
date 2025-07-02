@@ -177,8 +177,8 @@ def get_option_snapshot(contract):
         logging.warning(f"IBKR did not return a ticker object for {contract.localSymbol}.")
         return None
     
-    if ticker.last != ticker.last and ticker.bid != ticker.bid:
-        logging.warning(f"Ticker for {contract.localSymbol} returned but contains no valid data.")
+    if ticker.delayedLast != ticker.delayedLast and ticker.delayedBid != ticker.delayedBid:
+        logging.warning(f"Ticker for {contract.localSymbol} returned but contains no valid delayed data.")
         return None
 
     return ticker
@@ -365,11 +365,22 @@ def monitor_position_with_trailing(contract, entry_price, quantity, dynamic_trai
 
         ticker = get_option_snapshot(contract)
         if ticker is None: continue
-        
-        current_price = ticker.last
-        if current_price != current_price: current_price = (ticker.bid + ticker.ask) / 2
+
+        # --- ROBUST PRICE EXTRACTION LOGIC ---
+        # Create a list of potential price sources in order of preference.
+        price_sources = [
+            ticker.delayedLast,
+            ticker.last,
+            (ticker.delayedBid + ticker.delayedAsk) / 2,
+            (ticker.bid + ticker.ask) / 2
+        ]
+        current_price = next((price for price in price_sources if price == price and price > 0), None)
+
+        if current_price is None:
+            logging.warning(f"Could not determine a valid price for {contract.localSymbol}. Skipping this tick.")
+            continue
+
         current_price = round(current_price, 2)
-        if current_price <= 0: continue
 
         state_changed = False
 
@@ -508,9 +519,19 @@ def trade_spy_options(spy_ticker):
         return
     logging.info(f"Liquidity check passed. Volume={volume}")
 
-    price = ticker.last if ticker.last == ticker.last else (ticker.bid + ticker.ask) / 2
-    option_price = round(price, 2)
-    if option_price <= 0: return
+    price_sources = [
+        ticker.delayedLast,
+        ticker.last,
+        (ticker.delayedBid + ticker.delayedAsk) / 2,
+        (ticker.bid + ticker.ask) / 2
+    ]
+    option_price = next((price for price in price_sources if price == price and price > 0), None)
+
+    if option_price is None:
+        logging.warning(f"Could not determine a valid entry price for {contract.localSymbol}. Aborting trade.")
+        return
+
+    option_price = round(option_price, 2)
 
     balance = get_account_balance()
     if balance <= 0: return
