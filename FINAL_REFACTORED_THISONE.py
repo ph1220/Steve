@@ -156,8 +156,8 @@ def is_market_open():
 # =========================
 def get_option_snapshot(contract):
     """
-    Fetches a full market data snapshot (ticker) for a contract from IBKR.
-    This includes price, volume, open interest, etc.
+    Fetches a delayed market data snapshot by explicitly requesting delayed tick types.
+    This prevents errors for accounts without real-time subscriptions.
 
     Args:
         contract: The ib_insync Contract object.
@@ -165,16 +165,19 @@ def get_option_snapshot(contract):
     Returns:
         The Ticker object if successful, otherwise None.
     """
+    # These are the tick IDs for delayed data.
+    # 66: Delayed Bid, 67: Delayed Ask, 68: Delayed Last, 75: Delayed Volume
+    DELAYED_TICKS = "66,67,68,75"
+
+    ticker = ib.reqMktData(contract, genericTickList=DELAYED_TICKS, snapshot=True, regulatorySnapshot=False)
     
-    ticker = ib.reqMktData(contract, '', True, False)
-    
-    ib.sleep(2) 
+    ib.sleep(3)
 
     if ticker is None:
         logging.warning(f"IBKR did not return a ticker object for {contract.localSymbol}.")
         return None
     
-    if ticker.last != ticker.last and ticker.bid != ticker.bid: # Check for NaN on both last and bid
+    if ticker.last != ticker.last and ticker.bid != ticker.bid:
         logging.warning(f"Ticker for {contract.localSymbol} returned but contains no valid data.")
         return None
 
