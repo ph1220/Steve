@@ -65,28 +65,36 @@ STATE_FILE = "trade_state.json"
 # --- ADJUST THESE VALUES AS NEEDED ---
 strategy_config = {
     "BASE_ALLOCATION_PERCENT": 0.05,
-    "BASE_TRAILING_PERCENT": 11.0, # Changed from 15.0 to 11.0
-    "VIX_HIGH_SIGNAL_THRESHOLD": 25.0, # Changed from 24 to 25
+    "VIX_HIGH_SIGNAL_THRESHOLD": 25.0,
     "VIX_HIGH_RISK_THRESHOLD": 24.0,
     "VIX_LOW_RISK_THRESHOLD": 17.0,
-    "RSI_HIGH_VIX_OVERSOLD": 26.0, # Changed from 25 to 26
-    "RSI_HIGH_VIX_OVERBOUGHT": 74.0, # Changed from 75 to 74
-    "RSI_STD_OVERSOLD": 28.0, # Changed from 30 to 28
-    "RSI_STD_OVERBOUGHT": 72.0, # Changed from 70 to 72
-    "HIGH_VIX_ALLOCATION_MULT": 0.35, # Changed from 0.5 to 0.35
-    "LOW_VIX_ALLOCATION_MULT": 1.25, # Changed from 1.15 to 1.25
-    "HIGH_VIX_TRAILING_STOP": 22.0, # Changed from 20.0 to 22.0
-    "LOW_VIX_TRAILING_STOP": 11.0, # Changed from 10.0 to 11.0
+    "RSI_HIGH_VIX_OVERSOLD": 26.0,
+    "RSI_HIGH_VIX_OVERBOUGHT": 74.0,
+    "RSI_STD_OVERSOLD": 27.0,
+    "RSI_STD_OVERBOUGHT": 73.0,
+    "HIGH_VIX_ALLOCATION_MULT": 0.35,
+    "LOW_VIX_ALLOCATION_MULT": 1.25,
     "MIN_VOLUME": 100,
-    # "MIN_OPEN_INTEREST": 500,
-    # --- NORMAL/LOW VIX - TREND FOLLOWING ---
-    "TREND_PROFIT_TARGET_1": 20.0,
-    "TREND_PROFIT_TARGET_2": 36.0,
-    "TREND_TIGHTENED_STOP": 8.5,
-    # --- HIGH VIX - MEAN REVERSION ---
-    "REVERSION_PROFIT_TARGET_1": 26.0,
-    "REVERSION_PROFIT_TARGET_2": 50.0,
-    "REVERSION_TIGHTENED_STOP": 6.0
+
+    # === SCALPING PARAMETERS ===
+
+    # --- Initial Risk (The most you'll let a trade go against you) ---
+    "LOW_VIX_TRAILING_STOP": 7.0,   # Tighter stop for calm markets
+    "HIGH_VIX_TRAILING_STOP": 10.5,  # Wider, but still tight for a VIX stop
+
+    # --- Profit Target 1 (The "Take Profit" Level) ---
+    "SCALP_PROFIT_TARGET_MULT": 1.75,
+
+    # --- Profit Target 2 (The "Home Run" - should be rare) ---
+    # We can keep a second target for the rare case a scalp turns into a runner.
+    "SCALP_RUNNER_TARGET_MULT": 3.0,
+
+    # --- Final Stop (After hitting a profit target) ---
+    # Once we're in profit, the stop becomes extremely tight to prevent give-back.
+    "TREND_TIGHTENED_STOP": 4.0,
+    "REVERSION_TIGHTENED_STOP": 4.0,
+    
+    "BREAKEVEN_COST_BUFFER_PERCENT": 0.5,
 }
 
 def save_trade_state(contract, entry_price, quantity, highest_price, trailing_percent, active_regime, breakeven_activated=False, profit_lock_activated=False):
@@ -407,7 +415,12 @@ def monitor_position_with_trailing(contract, entry_price, quantity, dynamic_trai
             save_trade_state(contract, entry_price, quantity, highest_price, current_trailing_percent, active_regime, breakeven_activated, profit_lock_activated)
 
         trailing_stop_price = highest_price * (1 - current_trailing_percent / 100)
-        final_stop_price = max(trailing_stop_price, entry_price) if breakeven_activated else trailing_stop_price
+        if breakeven_activated:
+            cost_buffer = 1 + (strategy_config["BREAKEVEN_COST_BUFFER_PERCENT"] / 100)
+            breakeven_plus_price = entry_price * cost_buffer
+            final_stop_price = max(trailing_stop_price, breakeven_plus_price)
+        else:
+            final_stop_price = trailing_stop_price
         final_stop_price = round(final_stop_price, 2)
 
         logging.info(f"{contract_display_name} - Gain: {current_gain_percent:+.1f}% | Current: {current_price:.2f} | High: {highest_price:.2f} | Stop: {final_stop_price:.2f} (Trail: {current_trailing_percent}%)")
@@ -471,16 +484,38 @@ def trade_spy_options(spy_ticker):
         return
     logging.info(f"Trade Signal: {direction} | Rationale: {trade_rationale}")
 
-    # --- Set Dynamic Parameters based on Regime ---
+    # --- NEW SCALPING DYNAMIC PARAMETERS ---
+    scalp_target_mult = strategy_config["SCALP_PROFIT_TARGET_MULT"]
+    runner_target_mult = strategy_config["SCALP_RUNNER_TARGET_MULT"]
+
     if is_high_vix:
         current_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"] * strategy_config["HIGH_VIX_ALLOCATION_MULT"]
         current_trailing_percent = strategy_config["HIGH_VIX_TRAILING_STOP"]
-        active_profit_targets = {"target_1": strategy_config["REVERSION_PROFIT_TARGET_1"], "target_2": strategy_config["REVERSION_PROFIT_TARGET_2"], "tightened_stop": strategy_config["REVERSION_TIGHTENED_STOP"]}
+    
+        profit_target_1 = current_trailing_percent * scalp_target_mult
+        profit_target_2 = current_trailing_percent * runner_target_mult
+    
+        active_profit_targets = {
+            "target_1": profit_target_1, 
+            "target_2": profit_target_2, 
+            "tightened_stop": strategy_config["REVERSION_TIGHTENED_STOP"]
+        }
+        logging.info(f"High VIX Scalp Mode: Risk={current_trailing_percent}%, PT1={profit_target_1:.1f}%, PT2={profit_target_2:.1f}%")
+
     else: # Normal or Low VIX
         current_allocation_percentage = strategy_config["BASE_ALLOCATION_PERCENT"] * strategy_config["LOW_VIX_ALLOCATION_MULT"]
         current_trailing_percent = strategy_config["LOW_VIX_TRAILING_STOP"]
-        active_profit_targets = {"target_1": strategy_config["TREND_PROFIT_TARGET_1"], "target_2": strategy_config["TREND_PROFIT_TARGET_2"], "tightened_stop": strategy_config["TREND_TIGHTENED_STOP"]}
 
+        profit_target_1 = current_trailing_percent * scalp_target_mult
+        profit_target_2 = current_trailing_percent * runner_target_mult
+
+        active_profit_targets = {
+            "target_1": profit_target_1, 
+            "target_2": profit_target_2, 
+            "tightened_stop": strategy_config["TREND_TIGHTENED_STOP"]
+        }
+        logging.info(f"Low VIX Scalp Mode: Risk={current_trailing_percent}%, PT1={profit_target_1:.1f}%, PT2={profit_target_2:.1f}%")
+        
     # --- Option Selection and Execution ---
     available_expiries = spy_ticker.options
     if len(available_expiries) < 2:
@@ -582,17 +617,35 @@ try:
 
         if trade_state.get("is_position_open"):
             logging.warning("RECOVERY MODE: Active trade found in state file. Resuming monitoring.")
-            
+    
+            # Load all necessary state variables
             contract = trade_state["contract"]
             entry_price = trade_state["entry_price"]
+            quantity = trade_state["quantity"]
             trailing_percent = trade_state["trailing_percent"]
             active_regime = trade_state.get("active_regime", "TREND")
-            
+
+            # --- DYNAMICALLY REBUILD PROFIT TARGETS ON RECOVERY ---
+            scalp_target_mult = strategy_config["SCALP_PROFIT_TARGET_MULT"]
+            runner_target_mult = strategy_config["SCALP_RUNNER_TARGET_MULT"]
+
+            # Use the loaded trailing_percent from the state file to ensure consistency
+            profit_target_1 = trailing_percent * scalp_target_mult
+            profit_target_2 = trailing_percent * runner_target_mult
+
             if active_regime == "REVERSION":
-                active_profit_targets = {"target_1": strategy_config["REVERSION_PROFIT_TARGET_1"], "target_2": strategy_config["REVERSION_PROFIT_TARGET_2"], "tightened_stop": strategy_config["REVERSION_TIGHTENED_STOP"]}
-            else:
-                active_profit_targets = {"target_1": strategy_config["TREND_PROFIT_TARGET_1"], "target_2": strategy_config["TREND_PROFIT_TARGET_2"], "tightened_stop": strategy_config["TREND_TIGHTENED_STOP"]}
-            
+                tightened_stop = strategy_config["REVERSION_TIGHTENED_STOP"]
+            else: # TREND
+                tightened_stop = strategy_config["TREND_TIGHTENED_STOP"]
+    
+            active_profit_targets = {
+                "target_1": profit_target_1,
+                "target_2": profit_target_2,
+                "tightened_stop": tightened_stop
+            }
+            logging.info(f"Recovered {active_regime} Mode: Risk={trailing_percent}%, PT1={profit_target_1:.1f}%, PT2={profit_target_2:.1f}%")
+            # --- END DYNAMIC REBUILD ---
+    
             qualified_contracts = ib.qualifyContracts(contract)
             if not qualified_contracts:
                 logging.error(f"RECOVERY FAILED: Contract {contract.localSymbol} from state file is expired or invalid. Clearing state.")
@@ -602,7 +655,8 @@ try:
 
             # If successful, use the qualified contract
             contract = qualified_contracts[0]
-            quantity = trade_state["quantity"]
+    
+            # Call the monitor with the correctly loaded quantity
             monitor_position_with_trailing(contract, entry_price, quantity, trailing_percent, strategy_config, active_profit_targets, active_regime)
             logging.info("Monitoring finished. Returning to main loop.")
 
