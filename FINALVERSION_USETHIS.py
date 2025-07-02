@@ -64,7 +64,7 @@ STATE_FILE = "trade_state.json"
 
 # --- ADJUST THESE VALUES AS NEEDED ---
 strategy_config = {
-    "BASE_ALLOCATION_PERCENT": 0.03, # Changed from 0.05 to 0.03
+    "BASE_ALLOCATION_PERCENT": 0.05,
     "BASE_TRAILING_PERCENT": 11.0, # Changed from 15.0 to 11.0
     "VIX_HIGH_SIGNAL_THRESHOLD": 25.0, # Changed from 24 to 25
     "VIX_HIGH_RISK_THRESHOLD": 24.0,
@@ -75,18 +75,18 @@ strategy_config = {
     "RSI_STD_OVERBOUGHT": 72.0, # Changed from 70 to 72
     "HIGH_VIX_ALLOCATION_MULT": 0.35, # Changed from 0.5 to 0.35
     "LOW_VIX_ALLOCATION_MULT": 1.25, # Changed from 1.15 to 1.25
-    "HIGH_VIX_TRAILING_STOP": 20.0,
-    "LOW_VIX_TRAILING_STOP": 10.0,
+    "HIGH_VIX_TRAILING_STOP": 22.0, # Changed from 20.0 to 22.0
+    "LOW_VIX_TRAILING_STOP": 11.0, # Changed from 10.0 to 11.0
     "MIN_VOLUME": 100,
     # "MIN_OPEN_INTEREST": 500,
     # --- NORMAL/LOW VIX - TREND FOLLOWING ---
-    "TREND_PROFIT_TARGET_1": 25.0,  # Move to breakeven at 25%
-    "TREND_PROFIT_TARGET_2": 50.0,  # Tighten stop at 50%
-    "TREND_TIGHTENED_STOP": 8.0,    # The tightened stop for trends
+    "TREND_PROFIT_TARGET_1": 20.0,
+    "TREND_PROFIT_TARGET_2": 36.0,
+    "TREND_TIGHTENED_STOP": 8.5,
     # --- HIGH VIX - MEAN REVERSION ---
-    "REVERSION_PROFIT_TARGET_1": 15.0,  # Move to breakeven at only 15%
-    "REVERSION_PROFIT_TARGET_2": 30.0,  # Tighten stop at only 30%
-    "REVERSION_TIGHTENED_STOP": 5.0     # An even tighter stop for choppy markets
+    "REVERSION_PROFIT_TARGET_1": 26.0,
+    "REVERSION_PROFIT_TARGET_2": 50.0,
+    "REVERSION_TIGHTENED_STOP": 6.0
 }
 
 def save_trade_state(contract, entry_price, quantity, highest_price, trailing_percent, active_regime, breakeven_activated=False, profit_lock_activated=False):
